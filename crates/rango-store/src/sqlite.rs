@@ -13,7 +13,24 @@ pub struct Sqlite {
 
 pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
+    connect(&url).await
+}
+
+pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
+    let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
     let conn = Database::connect(&url).await.map_err(sql_err)?;
+    for pragma in [
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA busy_timeout=5000",
+    ] {
+        conn.execute_unprepared(pragma).await.map_err(sql_err)?;
+    }
+    Ok(Arc::new(Sqlite { conn }))
+}
+
+async fn connect(url: &str) -> Result<Arc<dyn Store>, StoreError> {
+    let conn = Database::connect(url).await.map_err(sql_err)?;
     Ok(Arc::new(Sqlite { conn }))
 }
 
@@ -31,6 +48,7 @@ fn bind(values: &[Value]) -> Vec<SeaValue> {
             Value::Str(value) => SeaValue::String(Some(Box::new(value.clone()))),
             Value::Bool(value) => SeaValue::Bool(Some(*value)),
             Value::DateTime(at) => SeaValue::BigInt(Some(at.timestamp())),
+            Value::Decimal(value) => SeaValue::String(Some(Box::new(value.to_string()))),
         })
         .collect()
 }

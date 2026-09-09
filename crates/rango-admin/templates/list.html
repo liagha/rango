@@ -3,7 +3,7 @@
 {% block nav %}<a href="../">Admin</a> / {{ title }}{% endblock %}
 {% block main %}
 <h1>{{ title }}</h1>
-<p><a class="btn" href="new/">Add</a></p>
+<p><a class="btn" href="new/{{ query }}">Add</a></p>
 <form class="bar" method="get" action="?">
 <input type="search" name="q" value="{{ q }}" placeholder="Search {{ title }}…">
 {% if !sort.is_empty() %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
@@ -34,7 +34,7 @@
 <tr>{% for column in columns %}<th><a href="{{ column.href }}">{{ column.name }} {{ column.marker }}</a></th>{% endfor %}</tr>
 {% for row in rows %}
 <tr>
-<td><a href="{{ row.id }}/">{{ row.id }}</a></td>
+<td><a href="{{ row.id }}/{{ query }}">{{ row.id }}</a></td>
 {% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}
 </tr>
 {% endfor %}

@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rango::{
-    Error, Repository, Store,
+    Error, Repository, Store, Value,
     chrono::Utc,
     urls::Routes,
     view::{self, Request},
@@ -238,7 +238,10 @@ impl Auth {
         if !verify(&self.secret, id, exp, &sig) {
             return None;
         }
-        Repository::<User>::new(store).get(id).await.ok()?
+        Repository::<User>::new(store)
+            .get(&Value::int(id))
+            .await
+            .ok()?
     }
 
     #[cfg(feature = "views")]

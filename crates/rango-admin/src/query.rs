@@ -37,7 +37,14 @@ pub(crate) fn keep(
 fn hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
     match field.kind.flat() {
         Type::Id | Type::Optional(_) => true,
-        Type::Str => text(value).to_lowercase().contains(&raw.to_lowercase()),
+        Type::Str | Type::Key => text(value).to_lowercase().contains(&raw.to_lowercase()),
+        Type::Decimal => match (value, raw.parse::<rango::decimal::Decimal>()) {
+            (Some(Value::Decimal(have)), Ok(want)) => *have == want,
+            (Some(Value::Str(have)), Ok(want)) => have
+                .parse::<rango::decimal::Decimal>()
+                .is_ok_and(|n| n == want),
+            _ => false,
+        },
         Type::Int => match (value, raw.parse::<i64>()) {
             (Some(Value::Int(have)), Ok(want)) => *have == want,
             _ => false,
@@ -102,6 +109,15 @@ pub(crate) fn href(base: &str, extra: &str) -> String {
         format!("?{extra}")
     } else {
         format!("?{base}&{extra}")
+    }
+}
+
+pub(crate) fn here(params: &HashMap<String, String>) -> String {
+    let qs = encode(params, &[]);
+    if qs.is_empty() {
+        String::new()
+    } else {
+        format!("?{qs}")
     }
 }
 

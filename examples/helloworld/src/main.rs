@@ -137,7 +137,10 @@ fn main() {
             store
         });
     let auth = rango_auth::Auth::new(&secret).signup(true);
-    let panel = rango_admin::Admin::new().model::<Message>();
+    let panel = rango_admin::Admin::new()
+        .model::<Message>()
+        .model::<helloworld::Product>()
+        .model::<helloworld::Category>();
     App::new(settings)
         .store(store)
         .urls(

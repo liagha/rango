@@ -43,7 +43,7 @@ pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error>
     }
     match kind {
         Type::Id | Type::Optional(_) => Ok(Value::Null),
-        Type::Str => Ok(Value::str(raw)),
+        Type::Str | Type::Key => Ok(Value::str(raw)),
         Type::Int => raw
             .parse::<i64>()
             .map(Value::int)
@@ -55,6 +55,10 @@ pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error>
             .parse::<f64>()
             .map(Value::float)
             .map_err(|_| bad(field, "a number")),
+        Type::Decimal => raw
+            .parse::<rango::decimal::Decimal>()
+            .map(Value::decimal)
+            .map_err(|_| bad(field, "a decimal")),
         Type::Bool => Ok(Value::bool(raw == "on")),
     }
 }
@@ -64,7 +68,7 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
     match field.kind.flat() {
         Type::Id | Type::Optional(_) => String::new(),
-        Type::Str => {
+        Type::Str | Type::Key | Type::Decimal => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="text" value="{}">"#,
                 escape(value)
@@ -101,7 +105,7 @@ pub(crate) fn filter_input(field: &Field, value: &str) -> String {
     let value = escape(value);
     match field.kind.flat() {
         Type::Id | Type::Optional(_) => String::new(),
-        Type::Str => {
+        Type::Str | Type::Key | Type::Decimal => {
             format!(
                 r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
             )

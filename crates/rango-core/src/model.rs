@@ -10,11 +10,13 @@ use crate::{
 #[derive(Clone, PartialEq)]
 pub enum Type {
     Id,
+    Key,
     Str,
     Int,
     Float,
     Bool,
     DateTime,
+    Decimal,
     Optional(Box<Type>),
 }
 
@@ -41,6 +43,7 @@ pub struct Field {
     pub kind: Type,
     pub unique: bool,
     pub default: Option<Value>,
+    pub references: Option<&'static str>,
 }
 
 impl Field {
@@ -50,11 +53,16 @@ impl Field {
             kind,
             unique: false,
             default: None,
+            references: None,
         }
     }
 
     pub fn id() -> Self {
         Self::new("id", Type::Id)
+    }
+
+    pub fn key(name: &'static str) -> Self {
+        Self::new(name, Type::Key)
     }
 
     pub fn unique(mut self) -> Self {
@@ -66,6 +74,19 @@ impl Field {
         self.default = Some(default);
         self
     }
+
+    pub fn references(mut self, table: &'static str) -> Self {
+        self.references = Some(table);
+        self
+    }
+
+    pub fn reference(&self) -> Option<(&'static str, &'static str)> {
+        let target = self.references?;
+        match target.split_once('.') {
+            Some((table, column)) => Some((table, column)),
+            None => Some((target, "id")),
+        }
+    }
 }
 
 pub trait Model: Clone + Send + Sync + 'static {
@@ -73,8 +94,8 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn fields() -> Vec<Field>;
     fn row(&self) -> Vec<Value>;
     fn from_row(row: &Row) -> Result<Self, StoreError>;
-    fn set_id(&mut self, id: i64);
-    fn id(&self) -> i64;
+    fn set_id(&mut self, id: Value);
+    fn id(&self) -> Value;
 
     fn ddl() -> String {
         Self::schema().ddl()
@@ -94,6 +115,13 @@ pub struct Schema {
 }
 
 impl Schema {
+    pub fn kinds(&self) -> Vec<ColumnKind> {
+        self.fields
+            .iter()
+            .map(|field| affinity(&field.kind))
+            .collect()
+    }
+
     pub fn ddl(&self) -> String {
         let columns: Vec<String> = self.fields.iter().map(column).collect();
         format!(
@@ -187,16 +215,21 @@ fn affinity(kind: &Type) -> ColumnKind {
     match kind {
         Type::Id | Type::Int | Type::DateTime | Type::Bool => ColumnKind::Integer,
         Type::Float => ColumnKind::Real,
-        Type::Str => ColumnKind::Text,
+        Type::Str | Type::Key | Type::Decimal => ColumnKind::Text,
         Type::Optional(inner) => affinity(inner),
     }
 }
 
 pub(crate) fn kinds<M: Model>() -> Vec<ColumnKind> {
+    M::schema().kinds()
+}
+
+fn id_column<M: Model>() -> &'static str {
     M::fields()
         .iter()
-        .map(|field| affinity(&field.kind))
-        .collect()
+        .find(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+        .map(|field| field.name)
+        .unwrap_or("id")
 }
 
 fn literal(value: &Value) -> String {
@@ -213,23 +246,29 @@ fn literal(value: &Value) -> String {
             }
         }
         Value::DateTime(at) => at.timestamp().to_string(),
+        Value::Decimal(value) => format!("'{value}'"),
     }
 }
 
 fn sql(kind: &Type) -> &'static str {
     match kind {
         Type::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        Type::Key => "TEXT PRIMARY KEY",
         Type::Str => "TEXT",
         Type::Int | Type::DateTime => "INTEGER",
         Type::Float => "REAL",
         Type::Bool => "INTEGER",
+        Type::Decimal => "TEXT",
         Type::Optional(inner) => sql(inner),
     }
 }
 
 fn column(field: &Field) -> String {
     let mut base = sql(&field.kind).to_string();
-    if field.kind != Type::Id {
+    if !matches!(field.kind.flat(), Type::Id | Type::Key) {
+        if let Some((table, column)) = field.reference() {
+            base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\")"));
+        }
         if field.unique {
             base.push_str(" UNIQUE");
         }
@@ -277,28 +316,50 @@ impl<M: Model> Repository<M> {
     }
 
     pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
+        self.save_many(std::slice::from_mut(model)).await
+    }
+
+    pub async fn save_many(&self, models: &mut [M]) -> Result<(), StoreError> {
+        if models.is_empty() {
+            return Ok(());
+        }
         self.ensure().await?;
-        let pairs = pairs(model);
-        let columns: Vec<&str> = pairs.iter().map(|pair| pair.0).collect();
-        let params: Vec<Value> = pairs.into_iter().map(|pair| pair.1).collect();
-        let holes = vec!["?"; params.len()].join(", ");
+        let keyed = M::fields()
+            .iter()
+            .any(|field| matches!(field.kind.flat(), Type::Key));
+        let mut columns = Vec::new();
+        let mut params = Vec::new();
+        let mut groups = Vec::new();
+        for model in models.iter() {
+            let pairs = pairs(model);
+            if columns.is_empty() {
+                columns = pairs.iter().map(|pair| format!("\"{}\"", pair.0)).collect();
+            }
+            groups.push(format!("({})", vec!["?"; pairs.len()].join(", ")));
+            params.extend(pairs.into_iter().map(|pair| pair.1));
+        }
         let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({holes})",
+            "INSERT INTO \"{}\" ({}) VALUES {}",
             M::table(),
-            columns.join(", ")
+            columns.join(", "),
+            groups.join(", ")
         );
         self.store.execute(&sql, &params).await?;
-        let id = self.store.last_id(M::table()).await?;
-        model.set_id(id);
+        if !keyed {
+            let first = self.store.last_id(M::table()).await? - models.len() as i64 + 1;
+            for (i, model) in models.iter_mut().enumerate() {
+                model.set_id(Value::int(first + i as i64));
+            }
+        }
         Ok(())
     }
 
-    pub async fn get(&self, id: i64) -> Result<Option<M>, StoreError> {
+    pub async fn get(&self, id: &Value) -> Result<Option<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM \"{}\" WHERE id = ?", M::table());
+        let sql = format!("SELECT * FROM \"{}\" WHERE \"{}\" = ?", M::table(), id_column::<M>());
         let rows = self
             .store
-            .fetch(&sql, &[Value::int(id)], &kinds::<M>())
+            .fetch(&sql, std::slice::from_ref(id), &kinds::<M>())
             .await?;
         rows.into_iter()
             .next()
@@ -308,7 +369,32 @@ impl<M: Model> Repository<M> {
 
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM \"{}\" ORDER BY id", M::table());
+        let sql = format!("SELECT * FROM \"{}\" ORDER BY \"{}\"", M::table(), id_column::<M>());
+        let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
+        rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn filter(&self, field: &str, value: &Value) -> Result<Vec<M>, StoreError> {
+        self.ensure().await?;
+        let sql = format!(
+            "SELECT * FROM \"{}\" WHERE \"{field}\" = ? ORDER BY \"{}\"",
+            M::table(),
+            id_column::<M>()
+        );
+        let rows = self
+            .store
+            .fetch(&sql, std::slice::from_ref(value), &kinds::<M>())
+            .await?;
+        rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn ordered(&self, field: &str, down: bool) -> Result<Vec<M>, StoreError> {
+        self.ensure().await?;
+        let sql = if down {
+            format!("SELECT * FROM \"{}\" ORDER BY \"{field}\" DESC", M::table())
+        } else {
+            format!("SELECT * FROM \"{}\" ORDER BY \"{field}\"", M::table())
+        };
         let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
     }
@@ -318,24 +404,25 @@ impl<M: Model> Repository<M> {
         let mut sets = Vec::new();
         let mut params = Vec::new();
         for (name, value) in pairs(model) {
-            sets.push(format!("{name} = ?"));
+            sets.push(format!("\"{name}\" = ?"));
             params.push(value);
         }
-        params.push(Value::int(model.id()));
+        params.push(model.id());
         let sql = format!(
-            "UPDATE \"{}\" SET {} WHERE id = ?",
+            "UPDATE \"{}\" SET {} WHERE \"{}\" = ?",
             M::table(),
-            sets.join(", ")
+            sets.join(", "),
+            id_column::<M>()
         );
         self.store.execute(&sql, &params).await?;
         Ok(())
     }
 
-    pub async fn delete(&self, id: i64) -> Result<(), StoreError> {
+    pub async fn delete(&self, id: &Value) -> Result<(), StoreError> {
         self.ensure().await?;
-        let sql = format!("DELETE FROM \"{}\" WHERE id = ?", M::table());
+        let sql = format!("DELETE FROM \"{}\" WHERE \"{}\" = ?", M::table(), id_column::<M>());
         self.store
-            .execute(&sql, &[Value::int(id)])
+            .execute(&sql, std::slice::from_ref(id))
             .await
             .map(|_| ())
     }
@@ -385,12 +472,14 @@ mod tests {
             })
         }
 
-        fn set_id(&mut self, id: i64) {
-            self.id = id;
+        fn set_id(&mut self, id: Value) {
+            if let Value::Int(id) = id {
+                self.id = id;
+            }
         }
 
-        fn id(&self) -> i64 {
-            self.id
+        fn id(&self) -> Value {
+            Value::int(self.id)
         }
     }
 
@@ -406,6 +495,51 @@ mod tests {
         assert_eq!(
             Post::schema().ddl(),
             "CREATE TABLE IF NOT EXISTS \"posts\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"title\" TEXT NOT NULL)"
+        );
+    }
+
+    #[derive(Clone)]
+    struct Product {
+        sku: String,
+        price: rust_decimal::Decimal,
+    }
+
+    impl Model for Product {
+        fn table() -> &'static str {
+            "products"
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![Field::key("sku"), Field::new("price", Type::Decimal)]
+        }
+
+        fn row(&self) -> Vec<Value> {
+            vec![Value::str(&self.sku), Value::decimal(self.price)]
+        }
+
+        fn from_row(row: &Row) -> Result<Self, StoreError> {
+            Ok(Self {
+                sku: row.str(0)?,
+                price: row.decimal(1)?,
+            })
+        }
+
+        fn set_id(&mut self, id: Value) {
+            if let Value::Str(id) = id {
+                self.sku = id;
+            }
+        }
+
+        fn id(&self) -> Value {
+            Value::str(&self.sku)
+        }
+    }
+
+    #[test]
+    fn key_ddl() {
+        assert_eq!(
+            Product::schema().ddl(),
+            "CREATE TABLE IF NOT EXISTS \"products\" (\"sku\" TEXT PRIMARY KEY, \"price\" TEXT NOT NULL)"
         );
     }
 

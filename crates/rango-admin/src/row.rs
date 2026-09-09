@@ -19,6 +19,7 @@ pub(crate) fn text(value: Option<&Value>) -> String {
         Some(Value::Float(value)) => value.to_string(),
         Some(Value::Bool(value)) => value.to_string(),
         Some(Value::DateTime(at)) => when(at),
+        Some(Value::Decimal(value)) => value.to_string(),
         Some(Value::Null) | None => String::new(),
     }
 }
@@ -26,10 +27,11 @@ pub(crate) fn text(value: Option<&Value>) -> String {
 pub(crate) fn id_of(values: &[Value], fields: &[Field]) -> String {
     fields
         .iter()
-        .position(|field| field.kind == Type::Id)
+        .position(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
         .and_then(|i| values.get(i))
         .map(|value| match value {
             Value::Int(id) => id.to_string(),
+            Value::Str(id) => id.clone(),
             _ => String::new(),
         })
         .unwrap_or_default()
@@ -50,13 +52,17 @@ pub(crate) fn locate(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
 }
 
 pub(crate) fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
-    let mut out = vec![Value::int(model.id())];
+    let mut out = vec![model.id()];
     let mut values = model.row().into_iter();
     for field in fields {
         if field.kind == Type::Id {
             continue;
         }
-        out.push(values.next().unwrap_or(Value::Null));
+        let value = values.next().unwrap_or(Value::Null);
+        if matches!(field.kind.flat(), Type::Key) {
+            continue;
+        }
+        out.push(value);
     }
     out
 }

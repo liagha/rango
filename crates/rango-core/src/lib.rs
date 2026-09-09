@@ -24,6 +24,7 @@ pub use view::{Request, Response, View, get_view, html, redirect, render};
 
 pub use askama;
 pub use chrono;
+pub use rust_decimal as decimal;
 pub use serde;
 pub use tokio;
 

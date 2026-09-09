@@ -11,6 +11,7 @@ sqlite = ["dep:sea-orm"]
 [dependencies]
 sea-orm = { workspace = true, optional = true, default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 chrono.workspace = true
+rust_decimal.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

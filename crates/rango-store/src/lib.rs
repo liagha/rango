@@ -6,6 +6,7 @@ pub mod sqlite;
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -15,6 +16,7 @@ pub enum Value {
     Str(String),
     Bool(bool),
     DateTime(DateTime<Utc>),
+    Decimal(Decimal),
 }
 
 impl Value {
@@ -36,6 +38,10 @@ impl Value {
 
     pub fn datetime(at: DateTime<Utc>) -> Self {
         Self::DateTime(at)
+    }
+
+    pub fn decimal(v: Decimal) -> Self {
+        Self::Decimal(v)
     }
 }
 
@@ -97,6 +103,15 @@ impl Row {
             Some(Value::DateTime(at)) => Ok(*at),
             Some(Value::Int(stamp)) => DateTime::from_timestamp(*stamp, 0).ok_or_else(bad),
             Some(Value::Str(text)) => text.parse::<DateTime<Utc>>().map_err(|_| bad()),
+            _ => Err(bad()),
+        }
+    }
+
+    pub fn decimal(&self, i: usize) -> Result<Decimal, StoreError> {
+        let bad = || StoreError::Value(format!("row column {i} not decimal"));
+        match self.values.get(i) {
+            Some(Value::Decimal(value)) => Ok(*value),
+            Some(Value::Str(text)) => text.parse::<Decimal>().map_err(|_| bad()),
             _ => Err(bad()),
         }
     }

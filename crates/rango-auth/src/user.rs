@@ -49,12 +49,14 @@ impl Model for User {
         })
     }
 
-    fn set_id(&mut self, id: i64) {
-        self.id = id;
+    fn set_id(&mut self, id: Value) {
+        if let Value::Int(id) = id {
+            self.id = id;
+        }
     }
 
-    fn id(&self) -> i64 {
-        self.id
+    fn id(&self) -> Value {
+        Value::int(self.id)
     }
 }
 

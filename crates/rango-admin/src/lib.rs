@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use askama::Template;
 use axum::{
@@ -13,7 +10,7 @@ use rango::{
     Error, Repository, Response, Row, Store, StoreError, Value,
     chrono::{DateTime, Utc},
     forgery::{Token, cookie},
-    model::{Field, Model, Type},
+    model::{Field, Model, Schema, Type},
     store::ColumnKind,
     urls::Routes,
     view::{self, render},
@@ -25,19 +22,14 @@ mod query;
 mod row;
 
 use form::{filter_input, input, input_raw, locked, value};
-use query::{PAGE, encode, href, keep, sort_rows};
-use row::{cell, id_of, locate, when, with_id};
-
-#[derive(Clone)]
-struct Registered {
-    table: &'static str,
-}
+use query::{PAGE, encode, here, href, keep, sort_rows};
+use row::{cell, id_of, locate, text, when, with_id};
 
 #[derive(Clone)]
 struct History {
     id: i64,
     model: String,
-    row: i64,
+    row: String,
     action: Action,
     user: String,
     at: DateTime<Utc>,
@@ -52,7 +44,7 @@ impl Model for History {
         vec![
             Field::id(),
             Field::new("model", Type::Str),
-            Field::new("row", Type::Int),
+            Field::new("row", Type::Str),
             Field::new("action", Type::Str),
             Field::new("user", Type::Str),
             Field::new("at", Type::DateTime),
@@ -62,7 +54,7 @@ impl Model for History {
     fn row(&self) -> Vec<Value> {
         vec![
             Value::str(&self.model),
-            Value::int(self.row),
+            Value::str(&self.row),
             Value::str(self.action.name()),
             Value::str(&self.user),
             Value::datetime(self.at),
@@ -73,19 +65,21 @@ impl Model for History {
         Ok(Self {
             id: row.int(0)?,
             model: row.str(1)?,
-            row: row.int(2)?,
+            row: row.str(2)?,
             action: Action::parse(&row.str(3)?)?,
             user: row.str(4)?,
             at: row.datetime(5)?,
         })
     }
 
-    fn set_id(&mut self, id: i64) {
-        self.id = id;
+    fn set_id(&mut self, id: Value) {
+        if let Value::Int(id) = id {
+            self.id = id;
+        }
     }
 
-    fn id(&self) -> i64 {
-        self.id
+    fn id(&self) -> Value {
+        Value::int(self.id)
     }
 }
 
@@ -118,14 +112,14 @@ impl Action {
 async fn log(
     history: &Repository<History>,
     table: &'static str,
-    row: i64,
+    row: &Value,
     action: Action,
     current: &Current,
 ) {
     let mut entry = History {
         id: 0,
         model: table.to_string(),
-        row,
+        row: text(Some(row)),
         action,
         user: current
             .0
@@ -141,7 +135,7 @@ pub trait AdminModel: Model {
     fn columns() -> Vec<&'static str> {
         Self::fields()
             .iter()
-            .filter(|field| field.kind != Type::Id)
+            .filter(|field| !matches!(field.kind.flat(), Type::Id | Type::Key))
             .map(|field| field.name)
             .collect()
     }
@@ -161,35 +155,26 @@ pub trait AdminModel: Model {
 
 pub struct Admin {
     routes: Routes,
-    models: Arc<Mutex<Vec<Registered>>>,
+    models: Vec<Schema>,
 }
 
 impl Admin {
     pub fn new() -> Self {
-        let models = Arc::new(Mutex::new(Vec::new()));
-        let guard = models.clone();
-        let routes = Routes::new().route(
-            "/",
-            get(
-                move |store: Extension<Arc<dyn Store>>, OriginalUri(uri): OriginalUri| {
-                    let models = guard.clone();
-                    async move { dashboard(models, store, uri).await }
-                },
-            ),
-        );
-        Self { routes, models }
+        let routes = Routes::new().route("/", get(dashboard));
+        Self {
+            routes,
+            models: Vec::new(),
+        }
     }
 
     pub fn model<M: AdminModel>(mut self) -> Self {
-        if let Ok(mut models) = self.models.lock() {
-            models.push(Registered { table: M::table() });
-        }
+        self.models.push(M::schema());
         self.routes = self.routes.merge(model_routes::<M>(M::table()));
         self
     }
 
     pub fn routes(self) -> Routes {
-        self.routes
+        self.routes.layer(Extension(Arc::new(self.models)))
     }
 }
 
@@ -232,6 +217,7 @@ struct List {
     title: &'static str,
     q: String,
     sort: String,
+    query: String,
     filters: Vec<String>,
     columns: Vec<Column>,
     rows: Vec<Item>,
@@ -273,12 +259,20 @@ struct Detail {
     id: String,
     pairs: Vec<Pair>,
     past: Vec<Log>,
+    inlines: Vec<Inline>,
+    query: String,
     token: String,
 }
 
 struct Pair {
     name: String,
     value: String,
+}
+
+struct Inline {
+    title: String,
+    rows: Vec<Item>,
+    href: String,
 }
 
 struct Log {
@@ -303,17 +297,13 @@ fn back(uri: &Uri, drop: usize) -> String {
 }
 
 async fn dashboard(
-    models: Arc<Mutex<Vec<Registered>>>,
+    models: Extension<Arc<Vec<Schema>>>,
     store: Extension<Arc<dyn Store>>,
-    uri: Uri,
+    OriginalUri(uri): OriginalUri,
 ) -> Result<Response, Error> {
-    let registered: Vec<Registered> = models
-        .lock()
-        .map(|models| models.clone())
-        .map_err(|_| Error::Server("admin registry".into()))?;
     let base = uri.path().trim_end_matches('/');
     let mut items = Vec::new();
-    for model in &registered {
+    for model in models.0.iter() {
         let href = format!("{base}/{}/", model.table);
         let rows = store
             .fetch(
@@ -338,6 +328,8 @@ async fn dashboard(
 
 async fn list<M: AdminModel>(
     repository: Repository<M>,
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
@@ -345,10 +337,58 @@ async fn list<M: AdminModel>(
     let find = locate(&M::search(), &fields);
     let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
     let sort = params.get("sort").cloned().unwrap_or_default();
+    let mut related: HashMap<usize, Vec<String>> = HashMap::new();
+    if !query.is_empty() {
+        for (i, field) in fields.iter().enumerate() {
+            let Some((table, _)) = field.reference() else {
+                continue;
+            };
+            let Some(other) = models.0.iter().find(|spec| spec.table == table) else {
+                continue;
+            };
+            let rows = store
+                .fetch(
+                    &format!("SELECT * FROM \"{table}\""),
+                    &[],
+                    &other.kinds(),
+                )
+                .await
+                .unwrap_or_default();
+            let display: Vec<usize> = other
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| matches!(field.kind.flat(), Type::Str))
+                .map(|(j, _)| j)
+                .collect();
+            let pk = other
+                .fields
+                .iter()
+                .position(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+                .unwrap_or(0);
+            let mut ids = Vec::new();
+            for row in &rows {
+                if display
+                    .iter()
+                    .any(|&j| text(row.values.get(j)).to_lowercase().contains(&query))
+                {
+                    ids.push(text(row.values.get(pk)));
+                }
+            }
+            related.insert(i, ids);
+        }
+    }
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for model in repository.all().await? {
         let values = with_id(&model, &fields);
         if keep(&fields, &values, &query, &params, &find) {
+            rows.push(values);
+            continue;
+        }
+        let hit = related
+            .iter()
+            .any(|(i, ids)| ids.iter().any(|id| text(values.get(*i)) == *id));
+        if hit {
             rows.push(values);
         }
     }
@@ -406,6 +446,7 @@ async fn list<M: AdminModel>(
         title: M::table(),
         q: params.get("q").cloned().unwrap_or_default(),
         sort,
+        query: here(&params),
         filters,
         columns,
         rows: items,
@@ -417,14 +458,21 @@ async fn list<M: AdminModel>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn detail<M: AdminModel>(
     repository: Repository<M>,
     history: Repository<History>,
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
-    let model = repository.get(id).await?.ok_or(Error::NotFound)?;
+    let model = repository
+        .get(&Value::str(&id))
+        .await?
+        .ok_or(Error::NotFound)?;
     let fields = M::fields();
     let values = with_id(&model, &fields);
     let pairs = fields
@@ -452,11 +500,57 @@ async fn detail<M: AdminModel>(
             action: event.action.name().to_string(),
         })
         .collect();
+    let mut inlines = Vec::new();
+    for other in models.0.iter() {
+        if other.table == M::table() {
+            continue;
+        }
+        for field in &other.fields {
+            let linked = field
+                .reference()
+                .is_some_and(|(table, _)| table == M::table());
+            if !linked {
+                continue;
+            }
+            let rows = store
+                .fetch(
+                    &format!(
+                        "SELECT * FROM \"{}\" WHERE \"{}\" = ? ORDER BY \"id\"",
+                        other.table, field.name
+                    ),
+                    &[Value::str(&id)],
+                    &other.kinds(),
+                )
+                .await
+                .unwrap_or_default();
+            let at: Vec<usize> = other
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| !matches!(field.kind.flat(), Type::Id | Type::Key))
+                .map(|(i, _)| i)
+                .collect();
+            let mut items = Vec::new();
+            for row in &rows {
+                items.push(Item {
+                    id: id_of(&row.values, &other.fields),
+                    cells: at.iter().map(|&i| cell(&row.values, i)).collect(),
+                });
+            }
+            inlines.push(Inline {
+                title: other.table.to_string(),
+                rows: items,
+                href: format!("../{}/?{}={}", other.table, field.name, id),
+            });
+        }
+    }
     render(Detail {
         title: M::table(),
-        id: id.to_string(),
+        id,
         pairs,
         past,
+        inlines,
+        query: here(&params),
         token: token(&headers, guard),
     })
 }
@@ -537,7 +631,7 @@ async fn create<M: AdminModel>(
     }
     let mut model = M::from_row(&Row { values })?;
     repository.save(&mut model).await?;
-    log(&history, M::table(), model.id(), Action::Create, &current).await;
+    log(&history, M::table(), &model.id(), Action::Create, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -545,9 +639,12 @@ async fn show_edit<M: AdminModel>(
     repository: Repository<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
 ) -> Result<Response, Error> {
-    let model = repository.get(id).await?.ok_or(Error::NotFound)?;
+    let model = repository
+        .get(&Value::str(&id))
+        .await?
+        .ok_or(Error::NotFound)?;
     let values = model.row();
     let mut slots = values.iter();
     let mut inputs = Vec::new();
@@ -557,7 +654,7 @@ async fn show_edit<M: AdminModel>(
             continue;
         }
         let old = slots.next();
-        if fixed.contains(&field.name) {
+        if fixed.contains(&field.name) || matches!(field.kind.flat(), Type::Key) {
             inputs.push(locked(&field, old));
         } else {
             inputs.push(input(&field, old));
@@ -583,15 +680,18 @@ async fn replace<M: AdminModel>(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
-    let old = repository.get(id).await?.ok_or(Error::NotFound)?;
+    let saved = repository
+        .get(&Value::str(&id))
+        .await?
+        .ok_or(Error::NotFound)?;
     let fields = M::fields();
     let fixed = M::readonly();
-    let have = old.row();
+    let have = saved.row();
     let mut slots = have.iter();
-    let mut values = vec![Value::int(id)];
+    let mut values = vec![saved.id()];
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
     for field in &fields {
@@ -599,6 +699,9 @@ async fn replace<M: AdminModel>(
             continue;
         }
         let old = slots.next();
+        if matches!(field.kind.flat(), Type::Key) {
+            continue;
+        }
         if fixed.contains(&field.name) {
             inputs.push(locked(field, old));
             values.push(old.cloned().unwrap_or(Value::Null));
@@ -628,7 +731,14 @@ async fn replace<M: AdminModel>(
     }
     let model = M::from_row(&Row { values })?;
     repository.update(&model).await?;
-    log(&history, M::table(), id, Action::Edit, &current).await;
+    log(
+        &history,
+        M::table(),
+        &Value::str(&id),
+        Action::Edit,
+        &current,
+    )
+    .await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -637,9 +747,16 @@ async fn remove<M: AdminModel>(
     history: Repository<History>,
     current: Current,
     OriginalUri(uri): OriginalUri,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
 ) -> Result<Response, Error> {
-    repository.delete(id).await?;
-    log(&history, M::table(), id, Action::Delete, &current).await;
+    repository.delete(&Value::str(&id)).await?;
+    log(
+        &history,
+        M::table(),
+        &Value::str(&id),
+        Action::Delete,
+        &current,
+    )
+    .await;
     Ok(view::redirect(&back(&uri, 2)))
 }

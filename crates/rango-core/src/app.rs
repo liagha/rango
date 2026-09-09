@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use axum::{Router, extract::Extension};
 #[cfg(feature = "forgery")]
@@ -17,7 +17,10 @@ pub struct App {
     settings: Settings,
     store: Arc<dyn Store>,
     router: Router,
+    ready: Option<Ready>,
 }
+
+type Ready = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 impl App {
     pub fn new(settings: Settings) -> Self {
@@ -25,6 +28,7 @@ impl App {
             settings,
             store: crate::store::memory(),
             router: Router::new(),
+            ready: None,
         }
     }
 
@@ -49,6 +53,15 @@ impl App {
         self
     }
 
+    pub fn ready<F, Fut>(mut self, ready: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.ready = Some(Box::new(move || Box::pin(ready())));
+        self
+    }
+
     fn build(self) -> Router {
         let mut router = self
             .router
@@ -68,13 +81,16 @@ impl App {
         router
     }
 
-    pub async fn run(self) -> Result<(), std::io::Error> {
+    pub async fn run(mut self) -> Result<(), std::io::Error> {
         if self.settings.secret.is_none() {
             return Err(std::io::Error::other("set a secret before serving"));
         }
         let address = (self.settings.host.as_str(), self.settings.port);
         let listener = tokio::net::TcpListener::bind(address).await?;
         tracing::info!("rango running on http://{}", self.settings.port);
+        if let Some(ready) = self.ready.take() {
+            ready().await;
+        }
         axum::serve(listener, self.build()).await
     }
 

@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} {{ id }} · Admin{% endblock %}
-{% block nav %}<a href="../../">Admin</a> / <a href="../">{{ title }}</a> / {{ id }}{% endblock %}
+{% block nav %}<a href="../../">Admin</a> / <a href="../{{ query }}">{{ title }}</a> / {{ id }}{% endblock %}
 {% block main %}
 <h1>{{ title }} {{ id }}</h1>
-<p class="actions"><a class="btn" href="edit/">Edit</a></p>
+<p class="actions"><a class="btn" href="edit/{{ query }}">Edit</a></p>
 <table>
 <tbody>
 {% for pair in pairs %}
@@ -11,10 +11,28 @@
 {% endfor %}
 </tbody>
 </table>
-<form method="post" action="delete/">
+<form method="post" action="delete/{{ query }}">
 <input type="hidden" name="forgery" value="{{ token }}">
 <p class="actions"><button class="ghost" type="submit">Delete</button></p>
 </form>
+{% for inline in inlines %}
+<h2>{{ inline.title }}</h2>
+{% if inline.rows.is_empty() %}
+<p class="muted">None.</p>
+{% else %}
+<table>
+<tbody>
+{% for row in inline.rows %}
+<tr>
+<td><a href="../{{ inline.title }}/{{ row.id }}/">{{ row.id }}</a></td>
+{% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+<p><a href="{{ inline.href }}">View all</a></p>
+{% endif %}
+{% endfor %}
 <h2>History</h2>
 {% if past.is_empty() %}
 <p class="muted">No changes yet.</p>
