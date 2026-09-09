@@ -115,6 +115,14 @@ pub struct Schema {
 }
 
 impl Schema {
+    pub fn key(&self) -> &'static str {
+        self.fields
+            .iter()
+            .find(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+            .map(|field| field.name)
+            .unwrap_or("id")
+    }
+
     pub fn kinds(&self) -> Vec<ColumnKind> {
         self.fields
             .iter()
@@ -224,12 +232,35 @@ pub(crate) fn kinds<M: Model>() -> Vec<ColumnKind> {
     M::schema().kinds()
 }
 
-fn id_column<M: Model>() -> &'static str {
-    M::fields()
+pub fn id_column<M: Model>() -> &'static str {
+    M::schema().key()
+}
+
+pub fn key<M: Model>(raw: &str) -> Value {
+    let keyed = M::fields()
         .iter()
-        .find(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
-        .map(|field| field.name)
-        .unwrap_or("id")
+        .any(|field| matches!(field.kind.flat(), Type::Key) && field.name == id_column::<M>());
+    if keyed {
+        return Value::str(raw);
+    }
+    match raw.parse::<i64>() {
+        Ok(id) => Value::int(id),
+        Err(_) => Value::str(raw),
+    }
+}
+
+fn order<M: Model>(sort: &str) -> String {
+    let (name, down) = match sort.strip_prefix('-') {
+        Some(name) => (name, true),
+        None => (sort, false),
+    };
+    let known = M::fields().iter().any(|field| field.name == name);
+    let name = if known { name } else { id_column::<M>() };
+    if down {
+        format!("\"{name}\" DESC")
+    } else {
+        format!("\"{name}\"")
+    }
 }
 
 fn literal(value: &Value) -> String {
@@ -327,36 +358,47 @@ impl<M: Model> Repository<M> {
         let keyed = M::fields()
             .iter()
             .any(|field| matches!(field.kind.flat(), Type::Key));
-        let mut columns = Vec::new();
-        let mut params = Vec::new();
-        let mut groups = Vec::new();
-        for model in models.iter() {
-            let pairs = pairs(model);
-            if columns.is_empty() {
-                columns = pairs.iter().map(|pair| format!("\"{}\"", pair.0)).collect();
+        if keyed {
+            let mut columns = Vec::new();
+            let mut params = Vec::new();
+            let mut groups = Vec::new();
+            for model in models.iter() {
+                let found = pairs(model);
+                if columns.is_empty() {
+                    columns = found.iter().map(|pair| format!("\"{}\"", pair.0)).collect();
+                }
+                groups.push(format!("({})", vec!["?"; found.len()].join(", ")));
+                params.extend(found.into_iter().map(|pair| pair.1));
             }
-            groups.push(format!("({})", vec!["?"; pairs.len()].join(", ")));
-            params.extend(pairs.into_iter().map(|pair| pair.1));
+            let sql = format!(
+                "INSERT INTO \"{}\" ({}) VALUES {}",
+                M::table(),
+                columns.join(", "),
+                groups.join(", ")
+            );
+            self.store.execute(&sql, &params).await?;
+            return Ok(());
         }
-        let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES {}",
-            M::table(),
-            columns.join(", "),
-            groups.join(", ")
-        );
-        self.store.execute(&sql, &params).await?;
-        if !keyed {
-            let first = self.store.last_id(M::table()).await? - models.len() as i64 + 1;
-            for (i, model) in models.iter_mut().enumerate() {
-                model.set_id(Value::int(first + i as i64));
-            }
+        for model in models.iter_mut() {
+            let found = pairs(model);
+            let columns = found
+                .iter()
+                .map(|pair| pair.0.to_string())
+                .collect::<Vec<_>>();
+            let params = found.into_iter().map(|pair| pair.1).collect::<Vec<_>>();
+            let id = self.store.insert(M::table(), &columns, &params).await?;
+            model.set_id(Value::int(id));
         }
         Ok(())
     }
 
     pub async fn get(&self, id: &Value) -> Result<Option<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM \"{}\" WHERE \"{}\" = ?", M::table(), id_column::<M>());
+        let sql = format!(
+            "SELECT * FROM \"{}\" WHERE \"{}\" = ?",
+            M::table(),
+            id_column::<M>()
+        );
         let rows = self
             .store
             .fetch(&sql, std::slice::from_ref(id), &kinds::<M>())
@@ -369,7 +411,11 @@ impl<M: Model> Repository<M> {
 
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM \"{}\" ORDER BY \"{}\"", M::table(), id_column::<M>());
+        let sql = format!(
+            "SELECT * FROM \"{}\" ORDER BY \"{}\"",
+            M::table(),
+            id_column::<M>()
+        );
         let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
     }
@@ -390,13 +436,45 @@ impl<M: Model> Repository<M> {
 
     pub async fn ordered(&self, field: &str, down: bool) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
-        let sql = if down {
-            format!("SELECT * FROM \"{}\" ORDER BY \"{field}\" DESC", M::table())
+        let sort = if down {
+            format!("-{field}")
         } else {
-            format!("SELECT * FROM \"{}\" ORDER BY \"{field}\"", M::table())
+            field.to_string()
         };
-        let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
+        self.scan("", &[], &sort, None).await
+    }
+
+    pub async fn scan(
+        &self,
+        cond: &str,
+        params: &[Value],
+        sort: &str,
+        limit: Option<(usize, usize)>,
+    ) -> Result<Vec<M>, StoreError> {
+        self.ensure().await?;
+        let mut sql = format!("SELECT * FROM \"{}\"", M::table());
+        if !cond.is_empty() {
+            sql.push_str(&format!(" WHERE {cond}"));
+        }
+        sql.push_str(&format!(" ORDER BY {}", order::<M>(sort)));
+        if let Some((count, offset)) = limit {
+            sql.push_str(&format!(" LIMIT {count} OFFSET {offset}"));
+        }
+        let rows = self.store.fetch(&sql, params, &kinds::<M>()).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn total(&self, cond: &str, params: &[Value]) -> Result<usize, StoreError> {
+        self.ensure().await?;
+        let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", M::table());
+        if !cond.is_empty() {
+            sql.push_str(&format!(" WHERE {cond}"));
+        }
+        let rows = self
+            .store
+            .fetch(&sql, params, &[ColumnKind::Integer])
+            .await?;
+        Ok(rows.first().and_then(|row| row.int(0).ok()).unwrap_or(0) as usize)
     }
 
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
@@ -420,7 +498,11 @@ impl<M: Model> Repository<M> {
 
     pub async fn delete(&self, id: &Value) -> Result<(), StoreError> {
         self.ensure().await?;
-        let sql = format!("DELETE FROM \"{}\" WHERE \"{}\" = ?", M::table(), id_column::<M>());
+        let sql = format!(
+            "DELETE FROM \"{}\" WHERE \"{}\" = ?",
+            M::table(),
+            id_column::<M>()
+        );
         self.store
             .execute(&sql, std::slice::from_ref(id))
             .await

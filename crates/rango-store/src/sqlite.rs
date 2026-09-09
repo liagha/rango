@@ -180,6 +180,38 @@ impl Store for Sqlite {
             }
         })
     }
+
+    fn insert<'a>(
+        &'a self,
+        table: &'a str,
+        columns: &'a [String],
+        values: &'a [Value],
+    ) -> BoxFuture<'a, Result<i64, StoreError>> {
+        let table = table.to_string();
+        let columns = columns.to_vec();
+        let values = values.to_vec();
+        Box::pin(async move {
+            let cols = columns
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let marks = vec!["?"; columns.len()].join(", ");
+            let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({marks}) RETURNING \"id\"");
+            let rows = self
+                .conn
+                .query_all(statement(&sql, &values))
+                .await
+                .map_err(sql_err)?;
+            match rows
+                .first()
+                .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
+            {
+                Some(id) => Ok(id),
+                None => Err(StoreError::Value("no last id".into())),
+            }
+        })
+    }
 }
 
 #[cfg(test)]

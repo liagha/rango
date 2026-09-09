@@ -99,11 +99,11 @@ impl User {
         username: &str,
         password: &str,
     ) -> Result<Option<User>, Error> {
-        let users = Repository::<User>::new(store).all().await?;
+        let users = Repository::<User>::new(store)
+            .filter("username", &Value::str(username))
+            .await?;
         for user in users {
-            if user.username == username
-                && bcrypt::verify(password, &user.password).unwrap_or(false)
-            {
+            if bcrypt::verify(password, &user.password).unwrap_or(false) {
                 return Ok(Some(user));
             }
         }

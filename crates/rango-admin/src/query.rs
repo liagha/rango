@@ -1,98 +1,104 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::collections::HashMap;
 
-use rango::chrono::NaiveDate;
+use rango::chrono::{NaiveDate, NaiveTime};
 use rango::model::{Field, Type};
 use rango::store::Value;
 
-use super::row::text;
-
 pub(crate) const PAGE: usize = 25;
 
-pub(crate) fn keep(
+pub(crate) fn cond(
     fields: &[Field],
-    values: &[Value],
-    query: &str,
     params: &HashMap<String, String>,
+    query: &str,
     find: &[usize],
-) -> bool {
-    if !query.is_empty() {
-        let found = find
-            .iter()
-            .any(|&i| text(values.get(i)).to_lowercase().contains(query));
-        if !found {
-            return false;
-        }
-    }
-    fields.iter().enumerate().all(|(i, field)| {
+    related: &HashMap<usize, Vec<String>>,
+) -> (String, Vec<Value>) {
+    let mut parts = Vec::new();
+    let mut values = Vec::new();
+    for field in fields.iter() {
         if field.kind == Type::Id {
-            return true;
+            continue;
         }
-        match params.get(field.name) {
-            Some(raw) if !raw.is_empty() => hit(field, values.get(i), raw),
-            _ => true,
+        let raw = params.get(field.name).map(String::as_str).unwrap_or("");
+        if raw.is_empty() {
+            continue;
         }
-    })
-}
-
-fn hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
-    match field.kind.flat() {
-        Type::Id | Type::Optional(_) => true,
-        Type::Str | Type::Key => text(value).to_lowercase().contains(&raw.to_lowercase()),
-        Type::Decimal => match (value, raw.parse::<rango::decimal::Decimal>()) {
-            (Some(Value::Decimal(have)), Ok(want)) => *have == want,
-            (Some(Value::Str(have)), Ok(want)) => have
-                .parse::<rango::decimal::Decimal>()
-                .is_ok_and(|n| n == want),
-            _ => false,
-        },
-        Type::Int => match (value, raw.parse::<i64>()) {
-            (Some(Value::Int(have)), Ok(want)) => *have == want,
-            _ => false,
-        },
-        Type::DateTime => match (value, NaiveDate::parse_from_str(raw, "%Y-%m-%d")) {
-            (Some(Value::DateTime(have)), Ok(want)) => have.date_naive() == want,
-            _ => false,
-        },
-        Type::Float => match (value, raw.parse::<f64>()) {
-            (Some(Value::Float(have)), Ok(want)) => *have == want,
-            _ => false,
-        },
-        Type::Bool => match value {
-            Some(Value::Bool(have)) => *have == matches!(raw, "1" | "true" | "on" | "yes"),
-            _ => false,
-        },
+        match field.kind.flat() {
+            Type::Str | Type::Key => {
+                parts.push(format!("LOWER(\"{}\") LIKE ?", field.name));
+                values.push(Value::str(format!("%{}%", raw.to_lowercase())));
+            }
+            Type::Decimal => match raw.parse::<rango::decimal::Decimal>() {
+                Ok(number) => {
+                    parts.push(format!("\"{}\" = ?", field.name));
+                    values.push(Value::decimal(number));
+                }
+                Err(_) => return ("1 = 0".into(), Vec::new()),
+            },
+            Type::Int => match raw.parse::<i64>() {
+                Ok(number) => {
+                    parts.push(format!("\"{}\" = ?", field.name));
+                    values.push(Value::int(number));
+                }
+                Err(_) => return ("1 = 0".into(), Vec::new()),
+            },
+            Type::Float => match raw.parse::<f64>() {
+                Ok(number) => {
+                    parts.push(format!("\"{}\" = ?", field.name));
+                    values.push(Value::float(number));
+                }
+                Err(_) => return ("1 = 0".into(), Vec::new()),
+            },
+            Type::Bool => {
+                parts.push(format!("\"{}\" = ?", field.name));
+                values.push(Value::bool(matches!(raw, "1" | "true" | "on" | "yes")));
+            }
+            Type::DateTime => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+                Ok(day) => {
+                    let start = day.and_time(NaiveTime::MIN).and_utc();
+                    let end = day
+                        .succ_opt()
+                        .map(|next| next.and_time(NaiveTime::MIN).and_utc());
+                    match end {
+                        Some(end) => {
+                            parts.push(format!(
+                                "\"{}\" >= ? AND \"{}\" < ?",
+                                field.name, field.name
+                            ));
+                            values.push(Value::datetime(start));
+                            values.push(Value::datetime(end));
+                        }
+                        None => return ("1 = 0".into(), Vec::new()),
+                    }
+                }
+                Err(_) => return ("1 = 0".into(), Vec::new()),
+            },
+            _ => {}
+        }
     }
-}
-
-pub(crate) fn sort_rows(fields: &[Field], rows: &mut [Vec<Value>], sort: &str) {
-    if sort.is_empty() {
-        return;
+    if !query.is_empty() {
+        let mut search = Vec::new();
+        let mut terms = Vec::new();
+        for &i in find {
+            search.push(format!("LOWER(\"{}\") LIKE ?", fields[i].name));
+            terms.push(Value::str(format!("%{query}%")));
+        }
+        for (i, ids) in related {
+            if ids.is_empty() {
+                continue;
+            }
+            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            search.push(format!("\"{}\" IN ({marks})", fields[*i].name));
+            for id in ids {
+                terms.push(Value::str(id));
+            }
+        }
+        if !search.is_empty() {
+            parts.push(format!("({})", search.join(" OR ")));
+            values.extend(terms);
+        }
     }
-    let (name, down) = match sort.strip_prefix('-') {
-        Some(name) => (name, true),
-        None => (sort, false),
-    };
-    let Some(at) = fields.iter().position(|field| field.name == name) else {
-        return;
-    };
-    rows.sort_by(|one, other| {
-        let order = compare(one.get(at), other.get(at));
-        if down { order.reverse() } else { order }
-    });
-}
-
-fn compare(one: Option<&Value>, other: Option<&Value>) -> Ordering {
-    match (one, other) {
-        (Some(Value::Int(one)), Some(Value::Int(other))) => one.cmp(other),
-        (Some(Value::Float(one)), Some(Value::Float(other))) => one.total_cmp(other),
-        (Some(Value::Str(one)), Some(Value::Str(other))) => one.cmp(other),
-        (Some(Value::Bool(one)), Some(Value::Bool(other))) => one.cmp(other),
-        (Some(Value::DateTime(one)), Some(Value::DateTime(other))) => one.cmp(other),
-        (Some(Value::Null) | None, Some(Value::Null) | None) => Ordering::Equal,
-        (Some(Value::Null) | None, _) => Ordering::Greater,
-        (_, Some(Value::Null) | None) => Ordering::Less,
-        _ => Ordering::Equal,
-    }
+    (parts.join(" AND "), values)
 }
 
 pub(crate) fn encode(params: &HashMap<String, String>, skip: &[&str]) -> String {
@@ -133,62 +139,32 @@ mod tests {
         ]
     }
 
-    fn row() -> Vec<Value> {
-        vec![Value::int(1), Value::str("Ann"), Value::int(30)]
-    }
-
     #[test]
     fn search() {
         let fields = fields();
-        let values = row();
         let params = HashMap::new();
-        assert!(keep(&fields, &values, "ann", &params, &[1]));
-        assert!(!keep(&fields, &values, "bob", &params, &[1]));
-        assert!(keep(&fields, &values, "", &params, &[1]));
+        let (clause, terms) = cond(&fields, &params, "ann", &[1], &HashMap::new());
+        assert!(clause.contains("LIKE"));
+        assert_eq!(terms, vec![Value::str("%ann%")]);
+        let (clause, _) = cond(&fields, &params, "", &[1], &HashMap::new());
+        assert!(clause.is_empty());
     }
 
     #[test]
     fn filter() {
         let fields = fields();
-        let values = row();
         let mut params = HashMap::new();
         params.insert("name".into(), "an".into());
-        assert!(keep(&fields, &values, "", &params, &[1]));
-        params.insert("name".into(), "bo".into());
-        assert!(!keep(&fields, &values, "", &params, &[1]));
-        params.insert("name".into(), "".into());
+        let (clause, terms) = cond(&fields, &params, "", &[1], &HashMap::new());
+        assert!(clause.contains("LIKE"));
+        assert_eq!(terms, vec![Value::str("%an%")]);
         params.insert("age".into(), "30".into());
-        assert!(keep(&fields, &values, "", &params, &[1]));
-        params.insert("age".into(), "31".into());
-        assert!(!keep(&fields, &values, "", &params, &[1]));
-    }
-
-    #[test]
-    fn order() {
-        assert_eq!(
-            compare(Some(&Value::Int(1)), Some(&Value::Int(2))),
-            Ordering::Less
-        );
-        assert_eq!(
-            compare(Some(&Value::Null), Some(&Value::Int(1))),
-            Ordering::Greater
-        );
-        assert_eq!(compare(None, Some(&Value::Null)), Ordering::Equal);
-    }
-
-    #[test]
-    fn sort() {
-        let fields = fields();
-        let mut rows = vec![
-            vec![Value::int(2), Value::str("Bo"), Value::int(20)],
-            vec![Value::int(1), Value::str("Ann"), Value::int(30)],
-        ];
-        sort_rows(&fields, &mut rows, "age");
-        assert_eq!(rows[0][0], Value::int(2));
-        sort_rows(&fields, &mut rows, "-age");
-        assert_eq!(rows[0][0], Value::int(1));
-        sort_rows(&fields, &mut rows, "bogus");
-        assert_eq!(rows[0][0], Value::int(1));
+        let (clause, terms) = cond(&fields, &params, "", &[1], &HashMap::new());
+        assert!(clause.contains("AND"));
+        assert_eq!(terms.len(), 2);
+        params.insert("age".into(), "bad".into());
+        let (clause, _) = cond(&fields, &params, "", &[1], &HashMap::new());
+        assert_eq!(clause, "1 = 0");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use rango::{
     Error, Repository, Response, Row, Store, StoreError, Value,
     chrono::{DateTime, Utc},
     forgery::{Token, cookie},
-    model::{Field, Model, Schema, Type},
+    model::{Field, Model, Schema, Type, key},
     store::ColumnKind,
     urls::Routes,
     view::{self, render},
@@ -22,7 +22,7 @@ mod query;
 mod row;
 
 use form::{filter_input, input, input_raw, locked, value};
-use query::{PAGE, encode, here, href, keep, sort_rows};
+use query::{PAGE, cond, encode, here, href};
 use row::{cell, id_of, locate, text, when, with_id};
 
 #[derive(Clone)]
@@ -151,6 +151,10 @@ pub trait AdminModel: Model {
     fn readonly() -> Vec<&'static str> {
         Vec::new()
     }
+}
+
+pub fn history() -> Schema {
+    History::schema()
 }
 
 pub struct Admin {
@@ -305,6 +309,7 @@ async fn dashboard(
     let mut items = Vec::new();
     for model in models.0.iter() {
         let href = format!("{base}/{}/", model.table);
+        let _ = store.execute(&model.ddl(), &[]).await;
         let rows = store
             .fetch(
                 &format!("SELECT COUNT(*) FROM \"{}\"", model.table),
@@ -346,62 +351,55 @@ async fn list<M: AdminModel>(
             let Some(other) = models.0.iter().find(|spec| spec.table == table) else {
                 continue;
             };
+            let display: Vec<&Field> = other
+                .fields
+                .iter()
+                .filter(|field| matches!(field.kind.flat(), Type::Str))
+                .collect();
+            if display.is_empty() {
+                continue;
+            }
+            let term = format!("%{query}%");
+            let clause = display
+                .iter()
+                .map(|field| format!("LOWER(\"{}\") LIKE ?", field.name))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let terms = display
+                .iter()
+                .map(|_| Value::str(&term))
+                .collect::<Vec<_>>();
             let rows = store
                 .fetch(
-                    &format!("SELECT * FROM \"{table}\""),
-                    &[],
+                    &format!("SELECT * FROM \"{table}\" WHERE {clause}"),
+                    &terms,
                     &other.kinds(),
                 )
                 .await
                 .unwrap_or_default();
-            let display: Vec<usize> = other
-                .fields
-                .iter()
-                .enumerate()
-                .filter(|(_, field)| matches!(field.kind.flat(), Type::Str))
-                .map(|(j, _)| j)
-                .collect();
             let pk = other
                 .fields
                 .iter()
                 .position(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
                 .unwrap_or(0);
-            let mut ids = Vec::new();
-            for row in &rows {
-                if display
-                    .iter()
-                    .any(|&j| text(row.values.get(j)).to_lowercase().contains(&query))
-                {
-                    ids.push(text(row.values.get(pk)));
-                }
-            }
-            related.insert(i, ids);
+            related.insert(i, rows.iter().map(|row| text(row.values.get(pk))).collect());
         }
     }
-    let mut rows: Vec<Vec<Value>> = Vec::new();
-    for model in repository.all().await? {
-        let values = with_id(&model, &fields);
-        if keep(&fields, &values, &query, &params, &find) {
-            rows.push(values);
-            continue;
-        }
-        let hit = related
-            .iter()
-            .any(|(i, ids)| ids.iter().any(|id| text(values.get(*i)) == *id));
-        if hit {
-            rows.push(values);
-        }
-    }
-    let total = rows.len();
-    sort_rows(&fields, &mut rows, &sort);
+    let (clause, terms) = cond(&fields, &params, &query, &find, &related);
+    let total = repository.total(&clause, &terms).await?;
     let pages = total.div_ceil(PAGE);
     let page = params
         .get("page")
         .and_then(|page| page.parse::<usize>().ok())
         .unwrap_or(1)
         .clamp(1, pages.max(1));
-    let start = (page - 1) * PAGE;
-    let end = (start + PAGE).min(total);
+    let offset = (page - 1) * PAGE;
+    let rows: Vec<Vec<Value>> = repository
+        .scan(&clause, &terms, &sort, Some((PAGE, offset)))
+        .await?
+        .iter()
+        .map(|model| with_id(model, &fields))
+        .collect();
 
     let bare = encode(&params, &["page", "sort"]);
     let kept = encode(&params, &["page"]);
@@ -424,7 +422,7 @@ async fn list<M: AdminModel>(
         })
         .collect();
     let mut items = Vec::new();
-    for values in &rows[start..end] {
+    for values in &rows {
         items.push(Item {
             id: id_of(values, &fields),
             cells: at.iter().map(|&i| cell(values, i)).collect(),
@@ -470,7 +468,7 @@ async fn detail<M: AdminModel>(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let model = repository
-        .get(&Value::str(&id))
+        .get(&key::<M>(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let fields = M::fields();
@@ -515,10 +513,12 @@ async fn detail<M: AdminModel>(
             let rows = store
                 .fetch(
                     &format!(
-                        "SELECT * FROM \"{}\" WHERE \"{}\" = ? ORDER BY \"id\"",
-                        other.table, field.name
+                        "SELECT * FROM \"{}\" WHERE \"{}\" = ? ORDER BY \"{}\"",
+                        other.table,
+                        field.name,
+                        other.key()
                     ),
-                    &[Value::str(&id)],
+                    &[key::<M>(&id)],
                     &other.kinds(),
                 )
                 .await
@@ -642,7 +642,7 @@ async fn show_edit<M: AdminModel>(
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
     let model = repository
-        .get(&Value::str(&id))
+        .get(&key::<M>(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let values = model.row();
@@ -684,7 +684,7 @@ async fn replace<M: AdminModel>(
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let saved = repository
-        .get(&Value::str(&id))
+        .get(&key::<M>(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let fields = M::fields();
@@ -731,14 +731,7 @@ async fn replace<M: AdminModel>(
     }
     let model = M::from_row(&Row { values })?;
     repository.update(&model).await?;
-    log(
-        &history,
-        M::table(),
-        &Value::str(&id),
-        Action::Edit,
-        &current,
-    )
-    .await;
+    log(&history, M::table(), &key::<M>(&id), Action::Edit, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -749,11 +742,11 @@ async fn remove<M: AdminModel>(
     OriginalUri(uri): OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
-    repository.delete(&Value::str(&id)).await?;
+    repository.delete(&key::<M>(&id)).await?;
     log(
         &history,
         M::table(),
-        &Value::str(&id),
+        &key::<M>(&id),
         Action::Delete,
         &current,
     )

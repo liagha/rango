@@ -145,5 +145,6 @@ pub fn schema() -> Vec<Schema> {
         Product::schema(),
         Category::schema(),
         rango_auth::User::schema(),
+        rango_admin::history(),
     ]
 }

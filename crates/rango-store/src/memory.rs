@@ -17,15 +17,12 @@ struct Table {
     next_id: i64,
 }
 
-enum Query {
-    All {
-        order: Option<(String, bool)>,
-    },
-    Where {
-        column: String,
-        order: Option<(String, bool)>,
-    },
-    Count,
+struct Query {
+    table: String,
+    count: bool,
+    cond: String,
+    order: Option<(String, bool)>,
+    limit: Option<(usize, usize)>,
 }
 
 fn guard(table: Option<&Table>) -> Result<&Table, StoreError> {
@@ -117,17 +114,39 @@ fn insert(sql: &str) -> Result<(String, Vec<String>), StoreError> {
     Ok((table, names))
 }
 
-fn select(sql: &str) -> Result<(String, Query), StoreError> {
-    if let Some(rest) = sql.strip_prefix("SELECT COUNT(*) FROM ") {
-        let head = rest
-            .split_once(" WHERE ")
-            .map(|(head, _)| head)
-            .unwrap_or(rest);
-        return Ok((name(head), Query::Count));
-    }
-    let rest = sql
-        .strip_prefix("SELECT * FROM ")
-        .ok_or_else(|| StoreError::Sql(format!("unsupported {sql}")))?;
+fn select(sql: &str) -> Result<Query, StoreError> {
+    let (rest, count) = match sql.strip_prefix("SELECT COUNT(*) FROM ") {
+        Some(rest) => (rest, true),
+        None => (
+            sql.strip_prefix("SELECT * FROM ")
+                .ok_or_else(|| StoreError::Sql(format!("unsupported {sql}")))?,
+            false,
+        ),
+    };
+    let (rest, limit) = match rest.split_once(" LIMIT ") {
+        Some((head, tail)) => {
+            let (number, offset) = match tail.split_once(" OFFSET ") {
+                Some((number, offset)) => (
+                    number
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| StoreError::Sql(format!("unsupported {sql}")))?,
+                    offset
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| StoreError::Sql(format!("unsupported {sql}")))?,
+                ),
+                None => (
+                    tail.trim()
+                        .parse::<usize>()
+                        .map_err(|_| StoreError::Sql(format!("unsupported {sql}")))?,
+                    0,
+                ),
+            };
+            (head, Some((number, offset)))
+        }
+        None => (rest, None),
+    };
     let (rest, order) = match rest.split_once(" ORDER BY ") {
         Some((head, tail)) => {
             let (column, down) = match tail.strip_suffix(" DESC") {
@@ -138,19 +157,221 @@ fn select(sql: &str) -> Result<(String, Query), StoreError> {
         }
         None => (rest, None),
     };
-    if let Some((head, tail)) = rest.split_once(" WHERE ") {
-        let column = tail
-            .strip_suffix(" = ?")
-            .ok_or_else(|| StoreError::Sql(format!("unsupported {sql}")))?;
-        Ok((
-            name(head),
-            Query::Where {
-                column: name(column),
-                order,
-            },
-        ))
+    let (table, cond) = match rest.split_once(" WHERE ") {
+        Some((head, tail)) => (name(head), tail.to_string()),
+        None => (name(rest), String::new()),
+    };
+    Ok(Query {
+        table,
+        count,
+        cond,
+        order,
+        limit,
+    })
+}
+
+struct Filter<'a> {
+    text: &'a str,
+    at: usize,
+    params: &'a [Value],
+    next: usize,
+    columns: &'a [String],
+    row: &'a Row,
+}
+
+fn matches(columns: &[String], row: &Row, cond: &str, params: &[Value]) -> bool {
+    if cond.is_empty() {
+        return true;
+    }
+    let mut filter = Filter {
+        text: cond,
+        at: 0,
+        params,
+        next: 0,
+        columns,
+        row,
+    };
+    filter.expr().unwrap_or(false)
+}
+
+fn blanks(filter: &mut Filter) {
+    while filter.text.as_bytes().get(filter.at) == Some(&b' ') {
+        filter.at += 1;
+    }
+}
+
+fn word(filter: &mut Filter, want: &str) -> bool {
+    blanks(filter);
+    if filter.text[filter.at..].starts_with(want) {
+        filter.at += want.len();
+        true
     } else {
-        Ok((name(rest), Query::All { order }))
+        false
+    }
+}
+
+fn column(filter: &mut Filter) -> Result<String, StoreError> {
+    blanks(filter);
+    let rest = &filter.text[filter.at..];
+    let inner = if rest.starts_with("LOWER(") {
+        filter.at += 6;
+        let found = column(filter)?;
+        blanks(filter);
+        if !word(filter, ")") {
+            return Err(StoreError::Sql("bad lower".into()));
+        }
+        found
+    } else if let Some(body) = rest.strip_prefix('"') {
+        let end = body
+            .find('"')
+            .ok_or_else(|| StoreError::Sql("bad column".into()))?;
+        let found = body[..end].to_string();
+        filter.at += end + 2;
+        found
+    } else {
+        return Err(StoreError::Sql("bad column".into()));
+    };
+    Ok(inner)
+}
+
+fn param(filter: &mut Filter) -> Result<Value, StoreError> {
+    blanks(filter);
+    if !word(filter, "?") {
+        return Err(StoreError::Sql("expected param".into()));
+    }
+    let found = filter
+        .params
+        .get(filter.next)
+        .cloned()
+        .ok_or_else(|| StoreError::Sql("missing param".into()))?;
+    filter.next += 1;
+    Ok(found)
+}
+
+fn field(columns: &[String], row: &Row, name: &str) -> Option<Value> {
+    columns
+        .iter()
+        .position(|item| item == name)
+        .and_then(|at| row.values.get(at).cloned())
+}
+
+fn like(have: &str, want: &str) -> bool {
+    let (have, want) = (have.to_lowercase(), want.to_lowercase());
+    let body = want.trim_matches('%');
+    if want.starts_with('%') && want.ends_with('%') {
+        have.contains(body)
+    } else if want.starts_with('%') {
+        have.ends_with(body)
+    } else if want.ends_with('%') {
+        have.starts_with(body)
+    } else {
+        have == body
+    }
+}
+
+fn shown(value: &Value) -> String {
+    match value {
+        Value::Str(found) => found.clone(),
+        Value::Int(found) => found.to_string(),
+        Value::Float(found) => found.to_string(),
+        Value::Bool(found) => found.to_string(),
+        Value::DateTime(at) => at.to_string(),
+        Value::Decimal(found) => found.to_string(),
+        Value::Null => String::new(),
+    }
+}
+
+impl<'a> Filter<'a> {
+    fn expr(&mut self) -> Result<bool, StoreError> {
+        let mut found = self.term()?;
+        loop {
+            if word(self, "OR") {
+                let other = self.term()?;
+                found = found || other;
+            } else {
+                return Ok(found);
+            }
+        }
+    }
+
+    fn term(&mut self) -> Result<bool, StoreError> {
+        let mut found = self.factor()?;
+        loop {
+            if word(self, "AND") {
+                let other = self.factor()?;
+                found = found && other;
+            } else {
+                return Ok(found);
+            }
+        }
+    }
+
+    fn factor(&mut self) -> Result<bool, StoreError> {
+        blanks(self);
+        if word(self, "(") {
+            let found = self.expr()?;
+            blanks(self);
+            if !word(self, ")") {
+                return Err(StoreError::Sql("bad group".into()));
+            }
+            return Ok(found);
+        }
+        if word(self, "1 = 0") {
+            return Ok(false);
+        }
+        self.pred()
+    }
+
+    fn pred(&mut self) -> Result<bool, StoreError> {
+        let lowered = self.text[self.at..].starts_with("LOWER(");
+        let name = column(self)?;
+        blanks(self);
+        if word(self, "LIKE") {
+            let want = param(self)?;
+            let have = field(self.columns, self.row, &name).unwrap_or(Value::Null);
+            let pattern = shown(&want);
+            if lowered {
+                return Ok(like(&shown(&have), &pattern));
+            }
+            let body = pattern.trim_matches('%');
+            return Ok(shown(&have).contains(body));
+        }
+        if word(self, "IN") {
+            blanks(self);
+            if !word(self, "(") {
+                return Err(StoreError::Sql("bad in".into()));
+            }
+            let mut wants = Vec::new();
+            loop {
+                blanks(self);
+                if word(self, ")") {
+                    break;
+                }
+                wants.push(param(self)?);
+                blanks(self);
+                if word(self, ",") {
+                    continue;
+                }
+            }
+            let have = field(self.columns, self.row, &name).unwrap_or(Value::Null);
+            return Ok(wants.iter().any(|want| same(&have, want)));
+        }
+        let op = if word(self, "=") {
+            0
+        } else if word(self, ">=") {
+            1
+        } else if word(self, "<") {
+            2
+        } else {
+            return Err(StoreError::Sql("bad op".into()));
+        };
+        let want = param(self)?;
+        let have = field(self.columns, self.row, &name).unwrap_or(Value::Null);
+        match op {
+            0 => Ok(same(&have, &want)),
+            1 => Ok(rank(Some(&have), Some(&want)) != Ordering::Less),
+            _ => Ok(rank(Some(&have), Some(&want)) == Ordering::Less),
+        }
     }
 }
 
@@ -283,34 +504,24 @@ impl Store for Memory {
         let params = params.to_vec();
         Box::pin(async move {
             let tables = locked(&self.tables)?;
-            let (name, query) = select(&sql)?;
-            let table = guard(tables.iter().find(|table| table.name == name))?;
-            match query {
-                Query::Count => Ok(vec![Row {
-                    values: vec![Value::Int(table.rows.len() as i64)],
-                }]),
-                Query::All { order } => {
-                    let mut rows = table.rows.clone();
-                    sort(&mut rows, &table.columns, order)?;
-                    Ok(rows)
-                }
-                Query::Where { column, order } => {
-                    let Some(at) = table.columns.iter().position(|name| name == &column) else {
-                        return Err(StoreError::Sql(format!("no column {column}")));
-                    };
-                    let want = params
-                        .first()
-                        .ok_or_else(|| StoreError::Value("expected param".into()))?;
-                    let mut rows: Vec<Row> = table
-                        .rows
-                        .iter()
-                        .filter(|row| row.values.get(at).is_some_and(|value| same(value, want)))
-                        .cloned()
-                        .collect();
-                    sort(&mut rows, &table.columns, order)?;
-                    Ok(rows)
-                }
+            let query = select(&sql)?;
+            let table = guard(tables.iter().find(|table| table.name == query.table))?;
+            let mut rows: Vec<Row> = table
+                .rows
+                .iter()
+                .filter(|row| matches(&table.columns, row, &query.cond, &params))
+                .cloned()
+                .collect();
+            if query.count {
+                return Ok(vec![Row {
+                    values: vec![Value::Int(rows.len() as i64)],
+                }]);
             }
+            sort(&mut rows, &table.columns, query.order)?;
+            if let Some((count, offset)) = query.limit {
+                rows = rows.into_iter().skip(offset).take(count).collect();
+            }
+            Ok(rows)
         })
     }
 
@@ -319,6 +530,35 @@ impl Store for Memory {
         Box::pin(async move {
             let tables = locked(&self.tables)?;
             let table = guard(tables.iter().find(|table| table.name == name))?;
+            Ok(table.next_id)
+        })
+    }
+
+    fn insert<'a>(
+        &'a self,
+        table: &'a str,
+        columns: &'a [String],
+        values: &'a [Value],
+    ) -> BoxFuture<'a, Result<i64, StoreError>> {
+        let name = table.to_string();
+        let columns = columns.to_vec();
+        let values = values.to_vec();
+        Box::pin(async move {
+            let mut tables = locked(&self.tables)?;
+            let table = tables
+                .iter_mut()
+                .find(|table| table.name == name)
+                .ok_or_else(|| StoreError::Sql(format!("no table {name}")))?;
+            if columns.len() != values.len() {
+                return Err(StoreError::Value("bad params".into()));
+            }
+            let mut row = Vec::with_capacity(values.len() + 1);
+            if !columns.iter().any(|column| column == "id") {
+                table.next_id += 1;
+                row.push(Value::Int(table.next_id));
+            }
+            row.extend(values.iter().cloned());
+            table.rows.push(Row { values: row });
             Ok(table.next_id)
         })
     }
