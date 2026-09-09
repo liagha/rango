@@ -14,7 +14,7 @@ use axum::{
     extract::{FromRequestParts, State},
     http::request::Parts,
     middleware::{Next, from_fn_with_state},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use rango::{
     Error, Repository, Store,
@@ -82,6 +82,10 @@ impl Auth {
 
     pub fn require_login(&self, routes: Routes) -> Routes {
         routes.layer(from_fn_with_state(self.clone(), Self::deny))
+    }
+
+    pub fn require_superuser(&self, routes: Routes) -> Routes {
+        routes.layer(from_fn_with_state(self.clone(), Self::deny_super))
     }
 
     #[cfg(feature = "views")]
@@ -166,18 +170,12 @@ impl Auth {
     }
 
     async fn load(State(auth): State<Auth>, mut req: Request, next: Next) -> Response {
-        let (raw, store) = auth.peek(&req);
-        let user = auth.who(raw, store).await;
-        req.extensions_mut().insert(Current(user));
+        auth.fill(&mut req).await;
         next.run(req).await
     }
 
     async fn deny(State(auth): State<Auth>, mut req: Request, next: Next) -> Response {
-        if req.extensions().get::<Current>().is_none() {
-            let (raw, store) = auth.peek(&req);
-            let user = auth.who(raw, store).await;
-            req.extensions_mut().insert(Current(user));
-        }
+        auth.fill(&mut req).await;
         let inside = req
             .extensions()
             .get::<Current>()
@@ -186,6 +184,23 @@ impl Auth {
             next.run(req).await
         } else {
             view::redirect(&login_url(&auth.login, &req))
+        }
+    }
+
+    async fn deny_super(State(auth): State<Auth>, mut req: Request, next: Next) -> Response {
+        auth.fill(&mut req).await;
+        match req.extensions().get::<Current>() {
+            Some(Current(Some(user))) if user.superuser => next.run(req).await,
+            Some(Current(Some(_))) => Error::Forbidden.into_response(),
+            _ => view::redirect(&login_url(&auth.login, &req)),
+        }
+    }
+
+    async fn fill(&self, req: &mut Request) {
+        if req.extensions().get::<Current>().is_none() {
+            let (raw, store) = self.peek(req);
+            let user = self.who(raw, store).await;
+            req.extensions_mut().insert(Current(user));
         }
     }
 

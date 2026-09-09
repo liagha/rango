@@ -150,7 +150,7 @@ fn main() {
             ),
         )
         .urls(auth.routes())
-        .mount("/admin/", auth.require_login(panel.routes()))
+        .mount("/admin/", auth.require_superuser(panel.routes()))
         .mount_static()
         .serve()
         .unwrap();
