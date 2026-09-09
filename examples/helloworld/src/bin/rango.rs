@@ -1,6 +1,14 @@
 fn main() {
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-    let command = rango_cli::parse(std::env::args().skip(1)).unwrap_or_else(|fail| {
+    let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        None | Some("-h") | Some("--help") => {
+            println!("{}", rango_cli::usage());
+            return;
+        }
+        _ => {}
+    }
+    let command = rango_cli::parse(args).unwrap_or_else(|fail| {
         eprintln!("{fail}");
         std::process::exit(2);
     });

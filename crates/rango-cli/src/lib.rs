@@ -28,8 +28,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             Ok(Command::CreateSuperuser { username, password })
         }
         Some(other) => Err(format!("unknown command {other}")),
-        None => Err("usage: manage <migrate|createsuperuser>".into()),
+        None => Err(usage().into()),
     }
+}
+
+pub fn usage() -> &'static str {
+    "usage: rango <command>\ncommands:\n  migrate\n  createsuperuser [--username NAME] [--password PASS]"
 }
 
 pub async fn migrate(store: &Arc<dyn Store>, schemas: &[Schema]) -> Result<usize, StoreError> {
