@@ -7,3 +7,4 @@ edition.workspace = true
 rango-core.workspace = true
 rango-admin.workspace = true
 rango-auth.workspace = true
+rango-cli.workspace = true

@@ -23,6 +23,28 @@ struct Registered {
     table: &'static str,
 }
 
+pub trait AdminModel: Model {
+    fn columns() -> Vec<&'static str> {
+        Self::fields()
+            .iter()
+            .filter(|field| field.kind != Kind::Id)
+            .map(|field| field.name)
+            .collect()
+    }
+
+    fn search() -> Vec<&'static str> {
+        Self::fields()
+            .iter()
+            .filter(|field| matches!(flat(&field.kind), Kind::Str))
+            .map(|field| field.name)
+            .collect()
+    }
+
+    fn readonly() -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
 pub struct Admin {
     routes: Routes,
     models: Arc<Mutex<Vec<Registered>>>,
@@ -44,7 +66,7 @@ impl Admin {
         Self { routes, models }
     }
 
-    pub fn model<M: Model>(mut self) -> Self {
+    pub fn model<M: AdminModel>(mut self) -> Self {
         if let Ok(mut models) = self.models.lock() {
             models.push(Registered { table: M::table() });
         }
@@ -63,7 +85,7 @@ impl Default for Admin {
     }
 }
 
-fn model_routes<M: Model>(table: &str) -> Routes {
+fn model_routes<M: AdminModel>(table: &str) -> Routes {
     Routes::new()
         .route(format!("/{table}/"), get(list::<M>))
         .route(
@@ -127,6 +149,7 @@ struct FormView {
     sub: String,
     token: String,
     inputs: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Template)]
@@ -206,13 +229,18 @@ fn id_of(values: &[Value], fields: &[Field]) -> String {
         .unwrap_or_default()
 }
 
-fn positions(fields: &[Field]) -> Vec<usize> {
-    fields
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| field.kind != Kind::Id)
-        .map(|(i, _)| i)
-        .collect()
+fn wanted(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(i) = fields
+            .iter()
+            .position(|field| field.name == *name && field.kind != Kind::Id)
+            && !out.contains(&i)
+        {
+            out.push(i);
+        }
+    }
+    out
 }
 
 fn escape(value: &str) -> String {
@@ -234,25 +262,47 @@ fn display(value: Option<&Value>) -> String {
 }
 
 fn input(field: &Field, value: Option<&Value>) -> String {
+    control(
+        field,
+        &display(value),
+        matches!(value, Some(Value::Bool(true))),
+    )
+}
+
+fn input_raw(field: &Field, raw: &str) -> String {
+    control(
+        field,
+        raw,
+        matches!(flat(&field.kind), Kind::Bool) && raw == "on",
+    )
+}
+
+fn locked(field: &Field, value: Option<&Value>) -> String {
+    format!(
+        r#"<label>{}</label><p>{}</p>"#,
+        field.name,
+        escape(&text(value))
+    )
+}
+
+fn control(field: &Field, value: &str, checked: bool) -> String {
     let name = field.name;
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
-    let kind = flat(&field.kind);
-    match kind {
+    match flat(&field.kind) {
         Kind::Id | Kind::Optional(_) => String::new(),
         Kind::Str => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="text" value="{}">"#,
-                escape(&display(value))
+                escape(value)
             )
         }
         Kind::Int | Kind::DateTime | Kind::Float => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="number" value="{}">"#,
-                escape(&display(value))
+                escape(value)
             )
         }
         Kind::Bool => {
-            let checked = matches!(value, Some(Value::Bool(true)));
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="checkbox"{}>"#,
                 if checked { " checked" } else { "" }
@@ -293,12 +343,17 @@ fn parse(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
     }
 }
 
-fn has(fields: &[Field], values: &[Value], query: &str, params: &HashMap<String, String>) -> bool {
+fn has(
+    fields: &[Field],
+    values: &[Value],
+    query: &str,
+    params: &HashMap<String, String>,
+    find: &[usize],
+) -> bool {
     if !query.is_empty() {
-        let found = fields.iter().enumerate().any(|(i, field)| {
-            matches!(flat(&field.kind), Kind::Str)
-                && text(values.get(i)).to_lowercase().contains(query)
-        });
+        let found = find
+            .iter()
+            .any(|&i| text(values.get(i)).to_lowercase().contains(query));
         if !found {
             return false;
         }
@@ -443,18 +498,19 @@ async fn dashboard(
     render(Dashboard { entries: items })
 }
 
-async fn list<M: Model>(
+async fn list<M: AdminModel>(
     repo: Repo<M>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
-    let at = positions(&fields);
+    let at = wanted(&M::columns(), &fields);
+    let find = wanted(&M::search(), &fields);
     let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
     let sort = params.get("sort").cloned().unwrap_or_default();
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for model in repo.all().await? {
         let values = full(&model, &fields);
-        if has(&fields, &values, &query, &params) {
+        if has(&fields, &values, &query, &params, &find) {
             rows.push(values);
         }
     }
@@ -535,7 +591,7 @@ fn full<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
     out
 }
 
-async fn detail<M: Model>(
+async fn detail<M: AdminModel>(
     repo: Repo<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
@@ -560,14 +616,21 @@ async fn detail<M: Model>(
     })
 }
 
-async fn show_new<M: Model>(
+async fn show_new<M: AdminModel>(
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
 ) -> Result<Response, Error> {
+    let fixed = M::readonly();
     let inputs = M::fields()
         .iter()
         .filter(|field| field.kind != Kind::Id)
-        .map(|field| input(field, field.default.as_ref()))
+        .map(|field| {
+            if fixed.contains(&field.name) {
+                locked(field, field.default.as_ref())
+            } else {
+                input(field, field.default.as_ref())
+            }
+        })
         .collect();
     render(FormView {
         title: format!("New {}", M::table()),
@@ -577,29 +640,60 @@ async fn show_new<M: Model>(
         sub: "New".into(),
         token: token(&headers, guard),
         inputs,
+        errors: Vec::new(),
     })
 }
 
-async fn create<M: Model>(
+async fn create<M: AdminModel>(
     repo: Repo<M>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    guard: Option<Extension<Token>>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
+    let fixed = M::readonly();
     let mut values = Vec::with_capacity(fields.len());
+    let mut inputs = Vec::new();
+    let mut problems = Vec::new();
     for field in &fields {
         if field.kind == Kind::Id {
             values.push(Value::int(0));
             continue;
         }
-        values.push(parse(field, map.get(field.name))?);
+        if fixed.contains(&field.name) {
+            inputs.push(locked(field, field.default.as_ref()));
+            values.push(field.default.clone().unwrap_or(Value::Null));
+            continue;
+        }
+        let raw = map.get(field.name).map(String::as_str).unwrap_or("");
+        inputs.push(input_raw(field, raw));
+        match parse(field, map.get(field.name)) {
+            Ok(value) => values.push(value),
+            Err(fail) => {
+                problems.push(fail.to_string());
+                values.push(Value::Null);
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return render(FormView {
+            title: format!("New {}", M::table()),
+            model: M::table(),
+            home: "../",
+            up: "./",
+            sub: "New".into(),
+            token: token(&headers, guard),
+            inputs,
+            errors: problems,
+        });
     }
     let mut model = M::from_row(&Row { values })?;
     repo.save(&mut model).await?;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
-async fn show_edit<M: Model>(
+async fn show_edit<M: AdminModel>(
     repo: Repo<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
@@ -609,11 +703,17 @@ async fn show_edit<M: Model>(
     let values = model.row();
     let mut slots = values.iter();
     let mut inputs = Vec::new();
+    let fixed = M::readonly();
     for field in M::fields() {
         if field.kind == Kind::Id {
             continue;
         }
-        inputs.push(input(&field, slots.next()));
+        let old = slots.next();
+        if fixed.contains(&field.name) {
+            inputs.push(locked(&field, old));
+        } else {
+            inputs.push(input(&field, old));
+        }
     }
     render(FormView {
         title: format!("Edit {} {id}", M::table()),
@@ -623,30 +723,64 @@ async fn show_edit<M: Model>(
         sub: format!("Edit {id}"),
         token: token(&headers, guard),
         inputs,
+        errors: Vec::new(),
     })
 }
 
-async fn replace<M: Model>(
+async fn replace<M: AdminModel>(
     repo: Repo<M>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
-    repo.get(id).await?.ok_or(Error::NotFound)?;
+    let current = repo.get(id).await?.ok_or(Error::NotFound)?;
     let fields = M::fields();
+    let fixed = M::readonly();
+    let have = current.row();
+    let mut slots = have.iter();
     let mut values = vec![Value::int(id)];
+    let mut inputs = Vec::new();
+    let mut problems = Vec::new();
     for field in &fields {
         if field.kind == Kind::Id {
             continue;
         }
-        values.push(parse(field, map.get(field.name))?);
+        let old = slots.next();
+        if fixed.contains(&field.name) {
+            inputs.push(locked(field, old));
+            values.push(old.cloned().unwrap_or(Value::Null));
+            continue;
+        }
+        let raw = map.get(field.name).map(String::as_str).unwrap_or("");
+        inputs.push(input_raw(field, raw));
+        match parse(field, map.get(field.name)) {
+            Ok(value) => values.push(value),
+            Err(fail) => {
+                problems.push(fail.to_string());
+                values.push(old.cloned().unwrap_or(Value::Null));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return render(FormView {
+            title: format!("Edit {} {id}", M::table()),
+            model: M::table(),
+            home: "../../",
+            up: "../",
+            sub: format!("Edit {id}"),
+            token: token(&headers, guard),
+            inputs,
+            errors: problems,
+        });
     }
     let model = M::from_row(&Row { values })?;
     repo.update(&model).await?;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
-async fn remove<M: Model>(
+async fn remove<M: AdminModel>(
     repo: Repo<M>,
     OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,

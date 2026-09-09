@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Login · Admin</title>
+<title>Sign up</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#111;background:#fff;margin:0;line-height:1.5}
@@ -21,26 +21,19 @@ button:hover{background:#333;border-color:#333}
 </head>
 <body>
 <main>
-{% if let Some(name) = user %}
-<h1>Logged in</h1>
-<p class="muted">Signed in as {{ name }}.</p>
-<form method="post" action="logout">
-<input type="hidden" name="csrf" value="{{ token }}">
-<button type="submit">Log out</button>
-</form>
-{% else %}
-<h1>Login</h1>
+<h1>Sign up</h1>
 {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
 <form method="post">
 <input type="hidden" name="csrf" value="{{ token }}">
-<input type="hidden" name="next" value="{{ next }}">
-<label for="login-username">Username</label>
-<input id="login-username" name="username" type="text" value="{{ username }}" autocomplete="username">
-<label for="login-password">Password</label>
-<input id="login-password" name="password" type="password" autocomplete="current-password">
-<button type="submit">Log in</button>
+<label for="signup-username">Username</label>
+<input id="signup-username" name="username" type="text" value="{{ username }}" autocomplete="username">
+<label for="signup-password">Password</label>
+<input id="signup-password" name="password" type="password" autocomplete="new-password">
+<label for="signup-confirm">Confirm password</label>
+<input id="signup-confirm" name="confirm" type="password" autocomplete="new-password">
+<button type="submit">Create account</button>
 </form>
-{% endif %}
+<p class="muted"><a href="login">Log in</a> instead.</p>
 </main>
 </body>
 </html>

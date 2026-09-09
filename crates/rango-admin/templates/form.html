@@ -3,6 +3,15 @@
 {% block nav %}<a href="{{ home }}">Admin</a> / <a href="{{ up }}">{{ model }}</a> / {{ sub }}{% endblock %}
 {% block main %}
 <h1>{{ title }}</h1>
+{% if !errors.is_empty() %}
+<div class="errors">
+<ul>
+{% for error in errors %}
+<li>{{ error }}</li>
+{% endfor %}
+</ul>
+</div>
+{% endif %}
 <form method="post">
 <input type="hidden" name="csrf" value="{{ token }}">
 {% for input in inputs %}

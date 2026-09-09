@@ -1,3 +1,4 @@
+use helloworld::Message;
 use rango::model;
 use rango::prelude::*;
 use rango_auth::Current;
@@ -8,54 +9,6 @@ struct Index {
     name: String,
     messages: Vec<Message>,
     user: String,
-}
-
-#[derive(Clone)]
-struct Message {
-    id: i64,
-    name: String,
-    message: String,
-    created: i64,
-}
-
-impl Model for Message {
-    fn table() -> &'static str {
-        "messages"
-    }
-
-    fn fields() -> Vec<Field> {
-        vec![
-            Field::id(),
-            Field::new("name", Kind::Str),
-            Field::new("message", Kind::Str),
-            Field::new("created", Kind::DateTime),
-        ]
-    }
-
-    fn row(&self) -> Vec<Value> {
-        vec![
-            Value::str(&self.name),
-            Value::str(&self.message),
-            Value::int(self.created),
-        ]
-    }
-
-    fn from_row(row: &Row) -> Result<Self, StoreError> {
-        Ok(Message {
-            id: row.int(0)?,
-            name: row.str(1)?,
-            message: row.str(2)?,
-            created: row.int(3)?,
-        })
-    }
-
-    fn set_id(&mut self, id: i64) {
-        self.id = id;
-    }
-
-    fn id(&self) -> i64 {
-        self.id
-    }
 }
 
 async fn index(repo: Repo<Message>, current: Current) -> Result<Response, Error> {
@@ -161,23 +114,20 @@ fn secret() -> String {
     })
 }
 
-fn seed(store: &std::sync::Arc<dyn rango::Store>) {
+fn hint(store: &std::sync::Arc<dyn rango::Store>) {
     let store = store.clone();
     rango::tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async move {
-            let empty = Repo::<rango_auth::User>::new(store.clone())
+            let empty = Repo::<rango_auth::User>::new(store)
                 .all()
                 .await
                 .unwrap_or_default()
                 .is_empty();
             if empty {
-                match rango_auth::User::register(store, "admin", "adminadmin").await {
-                    Ok(user) => eprintln!("seeded login {} / adminadmin", user.username),
-                    Err(fail) => eprintln!("seed failed: {fail}"),
-                }
+                eprintln!("no users yet — run: cargo run --bin manage -- createsuperuser");
             }
         });
 }
@@ -188,8 +138,8 @@ fn main() {
         .secret(secret());
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
     let store = rango::store::sqlite::open(&db).unwrap();
-    seed(&store);
-    let auth = rango_auth::Auth::new(&settings.secret);
+    hint(&store);
+    let auth = rango_auth::Auth::new(&settings.secret).signup(true);
     let admin = rango_admin::Admin::new().model::<Message>();
     App::new(settings)
         .store(store)
