@@ -39,6 +39,13 @@ impl Value {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum ColumnKind {
+    Integer,
+    Real,
+    Text,
+}
+
 #[derive(Clone, Debug)]
 pub struct Row {
     pub values: Vec<Value>,
@@ -98,6 +105,7 @@ pub enum StoreError {
     Poison(String),
     Channel(String),
     Io(String),
+    Unsupported(String),
 }
 
 impl fmt::Display for StoreError {
@@ -107,7 +115,8 @@ impl fmt::Display for StoreError {
             | Self::Value(msg)
             | Self::Poison(msg)
             | Self::Channel(msg)
-            | Self::Io(msg) => write!(f, "{msg}"),
+            | Self::Io(msg)
+            | Self::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -127,7 +136,13 @@ pub trait Store: Send + Sync + 'static {
         &'a self,
         sql: &'a str,
         params: &'a [Value],
+        kinds: &'a [ColumnKind],
     ) -> BoxFuture<'a, Result<Rows, StoreError>>;
+
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<String>, StoreError>> {
+        let _ = table;
+        Box::pin(async { Err(StoreError::Unsupported("columns".into())) })
+    }
 
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 }

@@ -1,6 +1,5 @@
 fn main() {
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-    let store = rango::store::sqlite::open(&db).unwrap();
     let command = rango_cli::parse(std::env::args().skip(1)).unwrap_or_else(|fail| {
         eprintln!("{fail}");
         std::process::exit(2);
@@ -10,10 +9,11 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async move {
+            let store = rango::store::sqlite::open(&db).await.unwrap();
             match command {
                 rango_cli::Command::Migrate => {
                     match rango_cli::migrate(&store, &helloworld::schema()).await {
-                        Ok(count) => println!("migrated {count} tables"),
+                        Ok(count) => println!("migrated {count}"),
                         Err(fail) => {
                             eprintln!("migrate failed: {fail}");
                             std::process::exit(1);

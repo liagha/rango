@@ -3,9 +3,9 @@ pub use crate::error::Error;
 #[cfg(feature = "forgery")]
 pub use crate::forgery::{Token, cookie, guard, token};
 pub use crate::form::{Errors, FieldError, Form, Valid};
-pub use crate::model::{Field, Model, Repository, Type};
+pub use crate::model::{Field, Model, Repository, Schema, Type};
 pub use crate::settings::Settings;
-pub use crate::store::{Row, Store, StoreError, Value};
+pub use crate::store::{ColumnKind, Row, Store, StoreError, Value};
 pub use crate::urls::Routes;
 pub use crate::view::{Request, Response, View, get_view, html, redirect, render};
 pub use askama::Template;

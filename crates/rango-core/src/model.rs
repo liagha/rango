@@ -4,7 +4,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use crate::{
     error::Error,
-    store::{Row, Store, StoreError, Value},
+    store::{ColumnKind, Row, Store, StoreError, Value},
 };
 
 #[derive(Clone, PartialEq)]
@@ -77,13 +77,64 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn id(&self) -> i64;
 
     fn ddl() -> String {
-        let columns: Vec<String> = Self::fields().iter().map(column).collect();
+        Self::schema().ddl()
+    }
+
+    fn schema() -> Schema {
+        Schema {
+            table: Self::table(),
+            fields: Self::fields(),
+        }
+    }
+}
+
+pub struct Schema {
+    pub table: &'static str,
+    pub fields: Vec<Field>,
+}
+
+impl Schema {
+    pub fn ddl(&self) -> String {
+        let columns: Vec<String> = self.fields.iter().map(column).collect();
         format!(
             "CREATE TABLE IF NOT EXISTS {} ({})",
-            Self::table(),
+            self.table,
             columns.join(", ")
         )
     }
+
+    pub fn alter(&self, have: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for field in &self.fields {
+            if field.kind == Type::Id {
+                continue;
+            }
+            if !have.iter().any(|name| name == field.name) {
+                out.push(format!(
+                    "ALTER TABLE {} ADD COLUMN {}",
+                    self.table,
+                    column(field)
+                ));
+            }
+        }
+        out
+    }
+}
+
+fn affinity(kind: &Type) -> ColumnKind {
+    match kind {
+        Type::Id | Type::Int | Type::DateTime | Type::Bool => ColumnKind::Integer,
+        Type::Float => ColumnKind::Real,
+        Type::Str => ColumnKind::Text,
+        Type::Optional(inner) => affinity(inner),
+    }
+}
+
+pub(crate) fn kinds<M: Model>() -> Vec<ColumnKind> {
+    M::fields()
+        .iter()
+        .map(|field| affinity(&field.kind))
+        .collect()
 }
 
 fn literal(value: &Value) -> String {
@@ -183,7 +234,10 @@ impl<M: Model> Repository<M> {
     pub async fn get(&self, id: i64) -> Result<Option<M>, StoreError> {
         self.ensure().await?;
         let sql = format!("SELECT * FROM {} WHERE id = ?", M::table());
-        let rows = self.store.fetch(&sql, &[Value::int(id)]).await?;
+        let rows = self
+            .store
+            .fetch(&sql, &[Value::int(id)], &kinds::<M>())
+            .await?;
         rows.into_iter()
             .next()
             .map(|row| M::from_row(&row))
@@ -193,7 +247,7 @@ impl<M: Model> Repository<M> {
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
         let sql = format!("SELECT * FROM {} ORDER BY id", M::table());
-        let rows = self.store.fetch(&sql, &[]).await?;
+        let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
     }
 

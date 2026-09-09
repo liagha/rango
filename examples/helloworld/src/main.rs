@@ -110,22 +110,15 @@ fn secret() -> String {
     })
 }
 
-fn hint(store: &std::sync::Arc<dyn rango::Store>) {
-    let store = store.clone();
-    rango::tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async move {
-            let empty = Repository::<rango_auth::User>::new(store)
-                .all()
-                .await
-                .unwrap_or_default()
-                .is_empty();
-            if empty {
-                eprintln!("no users yet — run: cargo run --bin manage -- createsuperuser");
-            }
-        });
+async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
+    let empty = Repository::<rango_auth::User>::new(store.clone())
+        .all()
+        .await
+        .unwrap_or_default()
+        .is_empty();
+    if empty {
+        eprintln!("no users yet — run: cargo run --bin manage -- createsuperuser");
+    }
 }
 
 fn main() {
@@ -133,8 +126,15 @@ fn main() {
         .base_dir(env!("CARGO_MANIFEST_DIR"))
         .secret(secret());
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-    let store = rango::store::sqlite::open(&db).unwrap();
-    hint(&store);
+    let store = rango::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = rango::store::sqlite::open(&db).await.unwrap();
+            hint(&store).await;
+            store
+        });
     let auth = rango_auth::Auth::new(&settings.secret).signup(true);
     let panel = rango_admin::Admin::new().model::<Message>();
     App::new(settings)

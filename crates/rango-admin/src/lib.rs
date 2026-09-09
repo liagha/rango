@@ -13,6 +13,7 @@ use rango::{
     Error, Repository, Response, Row, Store, Value,
     forgery::{Token, cookie},
     model::{Model, Type},
+    store::ColumnKind,
     urls::Routes,
     view::{self, render},
 };
@@ -202,7 +203,11 @@ async fn dashboard(
     for model in &registered {
         let href = format!("{base}/{}/", model.table);
         let rows = store
-            .fetch(&format!("SELECT COUNT(*) FROM {}", model.table), &[])
+            .fetch(
+                &format!("SELECT COUNT(*) FROM {}", model.table),
+                &[],
+                &[ColumnKind::Integer],
+            )
             .await
             .unwrap_or_default();
         let count = match rows.first().and_then(|row| row.get(0)) {

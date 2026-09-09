@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rango::model::Schema;
 use rango_store::{Store, StoreError};
 
 pub enum Command {
@@ -31,11 +32,23 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     }
 }
 
-pub async fn migrate(store: &Arc<dyn Store>, ddls: &[String]) -> Result<usize, StoreError> {
-    for ddl in ddls {
-        store.execute(ddl, &[]).await?;
+pub async fn migrate(store: &Arc<dyn Store>, schemas: &[Schema]) -> Result<usize, StoreError> {
+    let mut done = 0;
+    for schema in schemas {
+        store.execute(&schema.ddl(), &[]).await?;
+        done += 1;
+        match store.columns(schema.table).await {
+            Ok(have) => {
+                for sql in schema.alter(&have) {
+                    store.execute(&sql, &[]).await?;
+                    done += 1;
+                }
+            }
+            Err(StoreError::Unsupported(_)) => {}
+            Err(fail) => return Err(fail),
+        }
     }
-    Ok(ddls.len())
+    Ok(done)
 }
 
 pub fn prompt(text: &str) -> String {

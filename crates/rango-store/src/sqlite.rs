@@ -1,64 +1,67 @@
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
+use std::{path::Path, sync::Arc};
+
+use sea_orm::{
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, QueryResult, Statement,
+    Value as SeaValue,
 };
 
-use rusqlite::{
-    Connection, params_from_iter,
-    types::{Value as SqValue, ValueRef},
-};
-
-use crate::{BoxFuture, Row, Rows, Store, StoreError, Value};
+use crate::{BoxFuture, ColumnKind, Row, Rows, Store, StoreError, Value};
 
 pub struct Sqlite {
-    conn: Arc<Mutex<Connection>>,
+    conn: DatabaseConnection,
 }
 
-pub fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
-    let conn = Connection::open(path).map_err(|err| StoreError::Io(err.to_string()))?;
-    Ok(Arc::new(Sqlite {
-        conn: Arc::new(Mutex::new(conn)),
-    }))
+pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
+    let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
+    let conn = Database::connect(&url).await.map_err(sql_err)?;
+    Ok(Arc::new(Sqlite { conn }))
 }
 
-fn sql_err(err: rusqlite::Error) -> StoreError {
+fn sql_err(err: DbErr) -> StoreError {
     StoreError::Sql(err.to_string())
 }
 
-fn poison() -> StoreError {
-    StoreError::Poison("sqlite lock".into())
-}
-
-fn channel(err: tokio::task::JoinError) -> StoreError {
-    StoreError::Channel(err.to_string())
-}
-
-fn bind(values: &[Value]) -> Vec<SqValue> {
+fn bind(values: &[Value]) -> Vec<SeaValue> {
     values
         .iter()
         .map(|value| match value {
-            Value::Null => SqValue::Null,
-            Value::Int(value) => SqValue::Integer(*value),
-            Value::Float(value) => SqValue::Real(*value),
-            Value::Str(value) => SqValue::Text(value.clone()),
-            Value::Bool(value) => SqValue::Integer(if *value { 1 } else { 0 }),
-            Value::DateTime(at) => SqValue::Integer(at.timestamp()),
+            Value::Null => SeaValue::String(None),
+            Value::Int(value) => SeaValue::BigInt(Some(*value)),
+            Value::Float(value) => SeaValue::Double(Some(*value)),
+            Value::Str(value) => SeaValue::String(Some(Box::new(value.clone()))),
+            Value::Bool(value) => SeaValue::Bool(Some(*value)),
+            Value::DateTime(at) => SeaValue::BigInt(Some(at.timestamp())),
         })
         .collect()
 }
 
-fn read(row: &rusqlite::Row<'_>, cols: usize) -> Result<Row, StoreError> {
-    let mut values = Vec::with_capacity(cols);
-    for i in 0..cols {
-        values.push(match row.get_ref(i).map_err(sql_err)? {
-            ValueRef::Null => Value::Null,
-            ValueRef::Integer(value) => Value::Int(value),
-            ValueRef::Real(value) => Value::Float(value),
-            ValueRef::Text(value) => Value::Str(String::from_utf8_lossy(value).into_owned()),
-            ValueRef::Blob(_) => return Err(StoreError::Value("blob unsupported".into())),
-        });
+fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
+    let mut values = Vec::with_capacity(kinds.len());
+    for (i, kind) in kinds.iter().enumerate() {
+        let value = match kind {
+            ColumnKind::Integer => match row.try_get_by_index::<Option<i64>>(i) {
+                Ok(Some(value)) => Value::Int(value),
+                Ok(None) => Value::Null,
+                Err(fail) => return Err(sql_err(fail)),
+            },
+            ColumnKind::Real => match row.try_get_by_index::<Option<f64>>(i) {
+                Ok(Some(value)) => Value::Float(value),
+                Ok(None) => Value::Null,
+                Err(fail) => return Err(sql_err(fail)),
+            },
+            ColumnKind::Text => match row.try_get_by_index::<Option<String>>(i) {
+                Ok(Some(value)) => Value::Str(value),
+                Ok(None) => Value::Null,
+                Err(fail) => return Err(sql_err(fail)),
+            },
+        };
+        values.push(value);
     }
     Ok(Row { values })
+}
+
+fn statement(sql: &str, params: &[Value]) -> Statement {
+    Statement::from_sql_and_values(DbBackend::Sqlite, sql, bind(params))
 }
 
 impl Store for Sqlite {
@@ -67,17 +70,14 @@ impl Store for Sqlite {
         sql: &'a str,
         params: &'a [Value],
     ) -> BoxFuture<'a, Result<usize, StoreError>> {
-        let conn = self.conn.clone();
         let sql = sql.to_string();
-        let values = bind(params);
+        let params = params.to_vec();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let conn = conn.lock().map_err(|_| poison())?;
-                conn.execute(&sql, params_from_iter(values.iter()))
-                    .map_err(sql_err)
-            })
-            .await
-            .map_err(channel)?
+            self.conn
+                .execute(statement(&sql, &params))
+                .await
+                .map(|done| done.rows_affected() as usize)
+                .map_err(sql_err)
         })
     }
 
@@ -85,39 +85,61 @@ impl Store for Sqlite {
         &'a self,
         sql: &'a str,
         params: &'a [Value],
+        kinds: &'a [ColumnKind],
     ) -> BoxFuture<'a, Result<Rows, StoreError>> {
-        let conn = self.conn.clone();
         let sql = sql.to_string();
-        let values = bind(params);
+        let params = params.to_vec();
+        let kinds = kinds.to_vec();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let conn = conn.lock().map_err(|_| poison())?;
-                let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
-                let cols = stmt.column_count();
-                let mut iter = stmt
-                    .query(params_from_iter(values.iter()))
-                    .map_err(sql_err)?;
-                let mut rows = Vec::new();
-                while let Some(row) = iter.next().map_err(sql_err)? {
-                    rows.push(read(row, cols)?);
+            let rows = self
+                .conn
+                .query_all(statement(&sql, &params))
+                .await
+                .map_err(sql_err)?;
+            rows.iter().map(|row| read(row, &kinds)).collect()
+        })
+    }
+
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<String>, StoreError>> {
+        let table = table.to_string();
+        Box::pin(async move {
+            let rows = self
+                .conn
+                .query_all(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("PRAGMA table_info(\"{table}\")"),
+                ))
+                .await
+                .map_err(sql_err)?;
+            let mut out = Vec::new();
+            for row in &rows {
+                match row.try_get_by_index::<Option<String>>(1) {
+                    Ok(Some(name)) => out.push(name),
+                    Ok(None) => {}
+                    Err(fail) => return Err(sql_err(fail)),
                 }
-                Ok(rows)
-            })
-            .await
-            .map_err(channel)?
+            }
+            Ok(out)
         })
     }
 
     fn last_id<'a>(&'a self, _table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>> {
-        let conn = self.conn.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                conn.lock()
-                    .map_err(|_| poison())
-                    .map(|c| c.last_insert_rowid())
-            })
-            .await
-            .map_err(channel)?
+            let rows = self
+                .conn
+                .query_all(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT last_insert_rowid()".to_string(),
+                ))
+                .await
+                .map_err(sql_err)?;
+            match rows
+                .first()
+                .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
+            {
+                Some(id) => Ok(id),
+                None => Err(StoreError::Value("no last id".into())),
+            }
         })
     }
 }

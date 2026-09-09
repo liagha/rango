@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard};
 
-use crate::{BoxFuture, Row, Rows, Store, StoreError, Value};
+use crate::{BoxFuture, ColumnKind, Row, Rows, Store, StoreError, Value};
 
 #[derive(Default)]
 pub struct Memory {
@@ -183,6 +183,7 @@ impl Store for Memory {
         &'a self,
         sql: &'a str,
         params: &'a [Value],
+        _kinds: &'a [ColumnKind],
     ) -> BoxFuture<'a, Result<Rows, StoreError>> {
         let sql = sql.to_string();
         let params = params.to_vec();

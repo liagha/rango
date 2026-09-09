@@ -52,6 +52,6 @@ impl Model for Message {
 
 impl AdminModel for Message {}
 
-pub fn schema() -> Vec<String> {
-    vec![Message::ddl(), rango_auth::User::ddl()]
+pub fn schema() -> Vec<Schema> {
+    vec![Message::schema(), rango_auth::User::schema()]
 }
