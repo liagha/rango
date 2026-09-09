@@ -14,7 +14,7 @@ use crate::{
 
 pub const LIMIT: usize = 2 * 1024 * 1024;
 
-const NAME: &str = "csrf";
+const NAME: &str = "forgery";
 
 #[derive(Clone)]
 pub struct Token(pub String);

@@ -5,7 +5,7 @@
 {% block content %}
 <h1>Contact</h1>
 <form method="post" action="/contact">
-    <input type="hidden" name="csrf" value="{{ token }}">
+    <input type="hidden" name="forgery" value="{{ token }}">
     <p>
         <label>Name
             <input type="text" name="name" value="{{ form.name }}" placeholder="Your name">

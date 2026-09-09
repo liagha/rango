@@ -5,14 +5,14 @@
 <h1>Logged in</h1>
 <p class="muted">Signed in as {{ name }}.</p>
 <form method="post" action="logout">
-<input type="hidden" name="csrf" value="{{ token }}">
+<input type="hidden" name="forgery" value="{{ token }}">
 <button type="submit">Log out</button>
 </form>
 {% else %}
 <h1>Login</h1>
 {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
 <form method="post">
-<input type="hidden" name="csrf" value="{{ token }}">
+<input type="hidden" name="forgery" value="{{ token }}">
 <input type="hidden" name="next" value="{{ next }}">
 <label for="login-username">Username</label>
 <input id="login-username" name="username" type="text" value="{{ username }}" autocomplete="username">

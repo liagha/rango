@@ -3,27 +3,35 @@ use std::sync::Arc;
 #[cfg(feature = "views")]
 use axum::extract::Query;
 #[cfg(feature = "views")]
+use axum::http::HeaderMap;
+#[cfg(feature = "views")]
 use axum::{
     extract::{Extension, Form},
     http::header::SET_COOKIE,
     routing::{get, post},
 };
 use axum::{
-    extract::{FromRequestParts, OriginalUri, State},
-    http::{HeaderMap, header::COOKIE, request::Parts},
+    extract::{FromRequestParts, State},
+    http::request::Parts,
     middleware::{Next, from_fn_with_state},
     response::Response,
 };
-use hmac::{Hmac, Mac};
 use rango::{
-    Error, Repo, Row, Store, StoreError, Value,
-    model::{self, Field, Kind, Model},
+    Error, Repository, Store,
+    chrono::Utc,
     urls::Routes,
     view::{self, Request},
 };
 #[cfg(feature = "views")]
-use rango::{csrf::Token, view::render};
-use sha2::Sha256;
+use rango::{forgery::Token, view::render};
+
+mod session;
+mod user;
+
+use session::{Claim, claim, cookie, login_url, verify};
+#[cfg(feature = "views")]
+use session::{safe_next, set_cookie, sign, token};
+pub use user::User;
 
 #[cfg(feature = "views")]
 use askama::Template;
@@ -190,13 +198,13 @@ impl Auth {
     async fn who(&self, raw: Option<Claim>, store: Option<Arc<dyn Store>>) -> Option<User> {
         let (id, exp, sig) = raw?;
         let store = store?;
-        if exp < model::now() {
+        if exp < Utc::now().timestamp() {
             return None;
         }
         if !verify(&self.secret, id, exp, &sig) {
             return None;
         }
-        Repo::<User>::new(store).get(id).await.ok()?
+        Repository::<User>::new(store).get(id).await.ok()?
     }
 
     #[cfg(feature = "views")]
@@ -252,9 +260,9 @@ impl Auth {
 
     #[cfg(feature = "views")]
     fn cookie_for(&self, user: &User) -> axum::http::HeaderValue {
-        let exp = model::now() + self.days * 86400;
+        let exp = Utc::now().timestamp() + self.days * 86400;
         let raw = format!("{}.{}.{}", user.id, exp, sign(&self.secret, user.id, exp));
-        set_cookie(&self.cookie, &raw, exp - model::now())
+        set_cookie(&self.cookie, &raw, self.days * 86400)
     }
 
     #[cfg(feature = "views")]
@@ -352,7 +360,7 @@ impl Auth {
         }
         user.password = bcrypt::hash(&form.password, bcrypt::DEFAULT_COST)
             .map_err(|fail| Error::Server(fail.to_string()))?;
-        Repo::new(store).update(&user).await?;
+        Repository::new(store).update(&user).await?;
         render(Password {
             error: String::new(),
             done: true,
@@ -373,7 +381,6 @@ impl Auth {
 #[derive(Clone)]
 pub struct Current(pub Option<User>);
 
-type Claim = (i64, i64, String);
 impl FromRequestParts<()> for Current {
     type Rejection = Error;
 
@@ -383,103 +390,6 @@ impl FromRequestParts<()> for Current {
             .get::<Current>()
             .cloned()
             .unwrap_or(Current(None)))
-    }
-}
-
-#[derive(Clone)]
-pub struct User {
-    pub id: i64,
-    pub username: String,
-    pub password: String,
-    pub created: i64,
-}
-
-impl Model for User {
-    fn table() -> &'static str {
-        "users"
-    }
-
-    fn fields() -> Vec<Field> {
-        vec![
-            Field::id(),
-            Field::new("username", Kind::Str).unique(),
-            Field::new("password", Kind::Str),
-            Field::new("created", Kind::DateTime),
-        ]
-    }
-
-    fn row(&self) -> Vec<Value> {
-        vec![
-            Value::str(&self.username),
-            Value::str(&self.password),
-            Value::int(self.created),
-        ]
-    }
-
-    fn from_row(row: &Row) -> Result<Self, StoreError> {
-        Ok(Self {
-            id: row.int(0)?,
-            username: row.str(1)?,
-            password: row.str(2)?,
-            created: row.int(3)?,
-        })
-    }
-
-    fn set_id(&mut self, id: i64) {
-        self.id = id;
-    }
-
-    fn id(&self) -> i64 {
-        self.id
-    }
-}
-
-impl User {
-    pub async fn register(
-        store: Arc<dyn Store>,
-        username: &str,
-        password: &str,
-    ) -> Result<User, Error> {
-        let username = username.trim();
-        if username.is_empty() {
-            return Err(Error::BadRequest("username is required".into()));
-        }
-        if password.len() < 8 {
-            return Err(Error::BadRequest(
-                "password must be at least 8 characters".into(),
-            ));
-        }
-        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
-            .map_err(|fail| Error::Server(fail.to_string()))?;
-        let mut user = User {
-            id: 0,
-            username: username.into(),
-            password: hash,
-            created: model::now(),
-        };
-        match Repo::new(store).save(&mut user).await {
-            Ok(()) => Ok(user),
-            Err(fail) if fail.to_string().contains("UNIQUE") => {
-                Err(Error::BadRequest("username is taken".into()))
-            }
-            Err(fail) => Err(Error::Server(fail.to_string())),
-        }
-    }
-
-    pub async fn login(
-        store: Arc<dyn Store>,
-        username: &str,
-        password: &str,
-    ) -> Result<Option<User>, Error> {
-        let users = Repo::<User>::new(store).all().await?;
-        for user in users {
-            if user.username == username
-                && bcrypt::verify(password, &user.password).unwrap_or(false)
-            {
-                return Ok(Some(user));
-            }
-        }
-        Ok(None)
     }
 }
 
@@ -544,120 +454,4 @@ struct PasswordForm {
     current: String,
     password: String,
     confirm: String,
-}
-
-#[cfg(feature = "views")]
-fn safe_next(raw: Option<String>) -> Option<String> {
-    raw.filter(|to| to.starts_with('/') && !to.starts_with("//"))
-}
-
-fn login_url(login: &str, req: &Request) -> String {
-    let back = req
-        .extensions()
-        .get::<OriginalUri>()
-        .map(|uri| {
-            uri.0
-                .path_and_query()
-                .map(|part| part.as_str())
-                .unwrap_or("/")
-                .to_string()
-        })
-        .unwrap_or_else(|| {
-            req.uri()
-                .path_and_query()
-                .map(|part| part.as_str())
-                .unwrap_or("/")
-                .to_string()
-        });
-    let next = serde_urlencoded::to_string([("next", back)]).unwrap_or_default();
-    format!("{login}?{next}")
-}
-
-fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').map(str::trim).find_map(|part| {
-                let (key, value) = part.split_once('=')?;
-                (key == name).then(|| value.to_string())
-            })
-        })
-}
-
-#[cfg(feature = "views")]
-fn token(headers: &HeaderMap, guard: Option<Extension<Token>>) -> String {
-    match guard {
-        Some(Extension(token)) => token.0.clone(),
-        None => cookie(headers, "csrf").unwrap_or_default(),
-    }
-}
-
-#[cfg(feature = "views")]
-fn sign(secret: &str, id: i64, exp: i64) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("auth secret takes any key");
-    mac.update(format!("{id}.{exp}").as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn verify(secret: &str, id: i64, exp: i64, sig: &str) -> bool {
-    let Some(want) = hex_decode(sig) else {
-        return false;
-    };
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
-        return false;
-    };
-    mac.update(format!("{id}.{exp}").as_bytes());
-    mac.verify_slice(&want).is_ok()
-}
-
-fn claim(raw: &str) -> Option<Claim> {
-    let mut parts = raw.split('.');
-    let id = parts.next()?.parse::<i64>().ok()?;
-    let exp = parts.next()?.parse::<i64>().ok()?;
-    let sig = parts.next()?.to_string();
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((id, exp, sig))
-}
-
-#[cfg(feature = "views")]
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 15) as usize] as char);
-    }
-    out
-}
-
-fn hex_val(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
-}
-
-fn hex_decode(raw: &str) -> Option<Vec<u8>> {
-    let bytes = raw.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks(2) {
-        out.push(hex_val(pair[0])? << 4 | hex_val(pair[1])?);
-    }
-    Some(out)
-}
-
-#[cfg(feature = "views")]
-fn set_cookie(name: &str, raw: &str, age: i64) -> axum::http::HeaderValue {
-    axum::http::HeaderValue::from_str(&format!(
-        "{name}={raw}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax"
-    ))
-    .expect("session cookie is header-safe")
 }

@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
@@ -11,12 +10,20 @@ use axum::{
     routing::{get, post},
 };
 use rango::{
-    Error, Repo, Response, Row, Store, Value,
-    csrf::{Token, cookie},
-    model::{Field, Kind, Model},
+    Error, Repository, Response, Row, Store, Value,
+    forgery::{Token, cookie},
+    model::{Model, Type},
     urls::Routes,
     view::{self, render},
 };
+
+mod form;
+mod query;
+mod row;
+
+use form::{filter_input, input, input_raw, locked, value};
+use query::{PAGE, encode, href, keep, sort_rows};
+use row::{cell, id_of, locate, with_id};
 
 #[derive(Clone)]
 struct Registered {
@@ -27,7 +34,7 @@ pub trait AdminModel: Model {
     fn columns() -> Vec<&'static str> {
         Self::fields()
             .iter()
-            .filter(|field| field.kind != Kind::Id)
+            .filter(|field| field.kind != Type::Id)
             .map(|field| field.name)
             .collect()
     }
@@ -35,7 +42,7 @@ pub trait AdminModel: Model {
     fn search() -> Vec<&'static str> {
         Self::fields()
             .iter()
-            .filter(|field| matches!(field.kind.flat(), Kind::Str))
+            .filter(|field| matches!(field.kind.flat(), Type::Str))
             .map(|field| field.name)
             .collect()
     }
@@ -181,257 +188,6 @@ fn back(uri: &Uri, drop: usize) -> String {
     format!("/{}/", parts.join("/"))
 }
 
-const PAGE: usize = 25;
-
-fn cell(values: &[Value], i: usize) -> String {
-    text(values.get(i))
-}
-
-fn text(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::Str(value)) => value.clone(),
-        Some(Value::Int(value)) => value.to_string(),
-        Some(Value::Float(value)) => value.to_string(),
-        Some(Value::Bool(value)) => value.to_string(),
-        Some(Value::Null) | None => String::new(),
-    }
-}
-
-fn id_of(values: &[Value], fields: &[Field]) -> String {
-    fields
-        .iter()
-        .position(|field| field.kind == Kind::Id)
-        .and_then(|i| values.get(i))
-        .map(|value| match value {
-            Value::Int(id) => id.to_string(),
-            _ => String::new(),
-        })
-        .unwrap_or_default()
-}
-
-fn locate(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
-    let mut out = Vec::new();
-    for name in names {
-        if let Some(i) = fields
-            .iter()
-            .position(|field| field.name == *name && field.kind != Kind::Id)
-            && !out.contains(&i)
-        {
-            out.push(i);
-        }
-    }
-    out
-}
-
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn input(field: &Field, value: Option<&Value>) -> String {
-    control(
-        field,
-        &text(value),
-        matches!(value, Some(Value::Bool(true))),
-    )
-}
-
-fn input_raw(field: &Field, raw: &str) -> String {
-    control(
-        field,
-        raw,
-        matches!(field.kind.flat(), Kind::Bool) && raw == "on",
-    )
-}
-
-fn locked(field: &Field, value: Option<&Value>) -> String {
-    format!(
-        r#"<label>{}</label><p>{}</p>"#,
-        field.name,
-        escape(&text(value))
-    )
-}
-
-fn control(field: &Field, value: &str, checked: bool) -> String {
-    let name = field.name;
-    let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
-    match field.kind.flat() {
-        Kind::Id | Kind::Optional(_) => String::new(),
-        Kind::Str => {
-            format!(
-                r#"{label}<input id="admin-{name}" name="{name}" type="text" value="{}">"#,
-                escape(value)
-            )
-        }
-        Kind::Int | Kind::DateTime | Kind::Float => {
-            format!(
-                r#"{label}<input id="admin-{name}" name="{name}" type="number" value="{}">"#,
-                escape(value)
-            )
-        }
-        Kind::Bool => {
-            format!(
-                r#"{label}<input id="admin-{name}" name="{name}" type="checkbox"{}>"#,
-                if checked { " checked" } else { "" }
-            )
-        }
-    }
-}
-
-fn bad(field: &Field, want: &str) -> Error {
-    Error::BadRequest(format!("{} must be {want}", field.name))
-}
-
-fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
-    let kind = field.kind.flat();
-    let raw = raw.map(String::as_str).unwrap_or("");
-    if raw.is_empty() && matches!(kind, Kind::Bool) {
-        return Ok(Value::bool(false));
-    }
-    if raw.is_empty() {
-        return if field.kind.is_optional() {
-            Ok(Value::Null)
-        } else {
-            Err(Error::BadRequest(format!("{} is required", field.name)))
-        };
-    }
-    match kind {
-        Kind::Id | Kind::Optional(_) => Ok(Value::Null),
-        Kind::Str => Ok(Value::str(raw)),
-        Kind::Int | Kind::DateTime => raw
-            .parse::<i64>()
-            .map(Value::int)
-            .map_err(|_| bad(field, "an integer")),
-        Kind::Float => raw
-            .parse::<f64>()
-            .map(Value::float)
-            .map_err(|_| bad(field, "a number")),
-        Kind::Bool => Ok(Value::bool(raw == "on")),
-    }
-}
-
-fn keep(
-    fields: &[Field],
-    values: &[Value],
-    query: &str,
-    params: &HashMap<String, String>,
-    find: &[usize],
-) -> bool {
-    if !query.is_empty() {
-        let found = find
-            .iter()
-            .any(|&i| text(values.get(i)).to_lowercase().contains(query));
-        if !found {
-            return false;
-        }
-    }
-    fields.iter().enumerate().all(|(i, field)| {
-        if field.kind == Kind::Id {
-            return true;
-        }
-        match params.get(field.name) {
-            Some(raw) if !raw.is_empty() => hit(field, values.get(i), raw),
-            _ => true,
-        }
-    })
-}
-
-fn hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
-    match field.kind.flat() {
-        Kind::Id | Kind::Optional(_) => true,
-        Kind::Str => text(value).to_lowercase().contains(&raw.to_lowercase()),
-        Kind::Int | Kind::DateTime => match (value, raw.parse::<i64>()) {
-            (Some(Value::Int(have)), Ok(want)) => *have == want,
-            _ => false,
-        },
-        Kind::Float => match (value, raw.parse::<f64>()) {
-            (Some(Value::Float(have)), Ok(want)) => *have == want,
-            _ => false,
-        },
-        Kind::Bool => match value {
-            Some(Value::Bool(have)) => *have == matches!(raw, "1" | "true" | "on" | "yes"),
-            _ => false,
-        },
-    }
-}
-
-fn compare(one: Option<&Value>, other: Option<&Value>) -> Ordering {
-    match (one, other) {
-        (Some(Value::Int(one)), Some(Value::Int(other))) => one.cmp(other),
-        (Some(Value::Float(one)), Some(Value::Float(other))) => one.total_cmp(other),
-        (Some(Value::Str(one)), Some(Value::Str(other))) => one.cmp(other),
-        (Some(Value::Bool(one)), Some(Value::Bool(other))) => one.cmp(other),
-        (Some(Value::Null) | None, Some(Value::Null) | None) => Ordering::Equal,
-        (Some(Value::Null) | None, _) => Ordering::Greater,
-        (_, Some(Value::Null) | None) => Ordering::Less,
-        _ => Ordering::Equal,
-    }
-}
-
-fn sort_rows(fields: &[Field], rows: &mut [Vec<Value>], sort: &str) {
-    if sort.is_empty() {
-        return;
-    }
-    let (name, down) = match sort.strip_prefix('-') {
-        Some(name) => (name, true),
-        None => (sort, false),
-    };
-    let Some(at) = fields.iter().position(|field| field.name == name) else {
-        return;
-    };
-    rows.sort_by(|one, other| {
-        let order = compare(one.get(at), other.get(at));
-        if down { order.reverse() } else { order }
-    });
-}
-
-fn encode(params: &HashMap<String, String>, skip: &[&str]) -> String {
-    let mut pairs: Vec<(&String, &String)> = params
-        .iter()
-        .filter(|(key, _)| !skip.contains(&key.as_str()))
-        .collect();
-    pairs.sort();
-    serde_urlencoded::to_string(pairs).unwrap_or_default()
-}
-
-fn href(base: &str, extra: &str) -> String {
-    if base.is_empty() {
-        format!("?{extra}")
-    } else {
-        format!("?{base}&{extra}")
-    }
-}
-
-fn filter_input(field: &Field, value: &str) -> String {
-    let name = field.name;
-    let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
-    let value = escape(value);
-    match field.kind.flat() {
-        Kind::Id | Kind::Optional(_) => String::new(),
-        Kind::Str => {
-            format!(
-                r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
-            )
-        }
-        Kind::Int | Kind::DateTime | Kind::Float => {
-            format!(
-                r#"{label}<input id="filter-{name}" name="{name}" type="number" value="{value}">"#
-            )
-        }
-        Kind::Bool => {
-            let picked = |want: &str| if value == want { " selected" } else { "" };
-            format!(
-                r#"{label}<select id="filter-{name}" name="{name}"><option value="">Any</option><option value="1"{}>Yes</option><option value="0"{}>No</option></select>"#,
-                picked("1"),
-                picked("0")
-            )
-        }
-    }
-}
-
 async fn dashboard(
     models: Arc<Mutex<Vec<Registered>>>,
     store: Extension<Arc<dyn Store>>,
@@ -463,7 +219,7 @@ async fn dashboard(
 }
 
 async fn list<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
@@ -472,7 +228,7 @@ async fn list<M: AdminModel>(
     let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
     let sort = params.get("sort").cloned().unwrap_or_default();
     let mut rows: Vec<Vec<Value>> = Vec::new();
-    for model in repo.all().await? {
+    for model in repository.all().await? {
         let values = with_id(&model, &fields);
         if keep(&fields, &values, &query, &params, &find) {
             rows.push(values);
@@ -518,7 +274,7 @@ async fn list<M: AdminModel>(
     }
     let filters = fields
         .iter()
-        .filter(|field| field.kind != Kind::Id)
+        .filter(|field| field.kind != Type::Id)
         .map(|field| {
             filter_input(
                 field,
@@ -543,25 +299,13 @@ async fn list<M: AdminModel>(
     })
 }
 
-fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
-    let mut out = vec![Value::int(model.id())];
-    let mut values = model.row().into_iter();
-    for field in fields {
-        if field.kind == Kind::Id {
-            continue;
-        }
-        out.push(values.next().unwrap_or(Value::Null));
-    }
-    out
-}
-
 async fn detail<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
 ) -> Result<Response, Error> {
-    let model = repo.get(id).await?.ok_or(Error::NotFound)?;
+    let model = repository.get(id).await?.ok_or(Error::NotFound)?;
     let fields = M::fields();
     let values = with_id(&model, &fields);
     let pairs = fields
@@ -587,7 +331,7 @@ async fn show_new<M: AdminModel>(
     let fixed = M::readonly();
     let inputs = M::fields()
         .iter()
-        .filter(|field| field.kind != Kind::Id)
+        .filter(|field| field.kind != Type::Id)
         .map(|field| {
             if fixed.contains(&field.name) {
                 locked(field, field.default.as_ref())
@@ -609,7 +353,7 @@ async fn show_new<M: AdminModel>(
 }
 
 async fn create<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
@@ -621,7 +365,7 @@ async fn create<M: AdminModel>(
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
     for field in &fields {
-        if field.kind == Kind::Id {
+        if field.kind == Type::Id {
             values.push(Value::int(0));
             continue;
         }
@@ -653,23 +397,23 @@ async fn create<M: AdminModel>(
         });
     }
     let mut model = M::from_row(&Row { values })?;
-    repo.save(&mut model).await?;
+    repository.save(&mut model).await?;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
 async fn show_edit<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
 ) -> Result<Response, Error> {
-    let model = repo.get(id).await?.ok_or(Error::NotFound)?;
+    let model = repository.get(id).await?.ok_or(Error::NotFound)?;
     let values = model.row();
     let mut slots = values.iter();
     let mut inputs = Vec::new();
     let fixed = M::readonly();
     for field in M::fields() {
-        if field.kind == Kind::Id {
+        if field.kind == Type::Id {
             continue;
         }
         let old = slots.next();
@@ -692,14 +436,14 @@ async fn show_edit<M: AdminModel>(
 }
 
 async fn replace<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
-    let current = repo.get(id).await?.ok_or(Error::NotFound)?;
+    let current = repository.get(id).await?.ok_or(Error::NotFound)?;
     let fields = M::fields();
     let fixed = M::readonly();
     let have = current.row();
@@ -708,7 +452,7 @@ async fn replace<M: AdminModel>(
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
     for field in &fields {
-        if field.kind == Kind::Id {
+        if field.kind == Type::Id {
             continue;
         }
         let old = slots.next();
@@ -740,15 +484,15 @@ async fn replace<M: AdminModel>(
         });
     }
     let model = M::from_row(&Row { values })?;
-    repo.update(&model).await?;
+    repository.update(&model).await?;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
 async fn remove<M: AdminModel>(
-    repo: Repo<M>,
+    repository: Repository<M>,
     OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,
 ) -> Result<Response, Error> {
-    repo.delete(id).await?;
+    repository.delete(id).await?;
     Ok(view::redirect(&back(&uri, 2)))
 }

@@ -1,15 +1,17 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
-#[cfg(feature = "csrf")]
-use axum::extract::DefaultBodyLimit;
-#[cfg(feature = "csrf")]
-use axum::middleware::from_fn;
 use axum::{Router, extract::Extension};
-use tower_http::{services::ServeDir, trace::TraceLayer};
+#[cfg(feature = "forgery")]
+use axum::{extract::DefaultBodyLimit, middleware::from_fn};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use tower_http::{catch_panic::CatchPanicLayer, services::ServeDir, trace::TraceLayer};
 
-#[cfg(feature = "csrf")]
-use crate::csrf;
-use crate::{middleware, settings::Settings, store::Store, urls::Routes, view};
+#[cfg(feature = "forgery")]
+use crate::forgery;
+use crate::{error::Error, settings::Settings, store::Store, urls::Routes};
 
 pub struct App {
     settings: Settings,
@@ -42,24 +44,26 @@ impl App {
     }
 
     pub fn mount_static(mut self) -> Self {
-        let dir = self.settings.static_dir.clone();
-        self.router = self.router.nest_service("/static", ServeDir::new(dir));
+        let dir = self.settings.assets.clone();
+        self.router = self.router.nest_service("/assets", ServeDir::new(dir));
         self
     }
 
     fn build(self) -> Router {
-        let mut router = self.router.fallback(|| async { view::not_found() });
+        let mut router = self
+            .router
+            .fallback(|| async { Error::NotFound.into_response() });
         router = router.layer(Extension(self.store));
-        #[cfg(feature = "csrf")]
-        if self.settings.csrf {
-            router = router.layer(from_fn(csrf::guard));
+        #[cfg(feature = "forgery")]
+        if self.settings.forgery {
+            router = router.layer(from_fn(forgery::guard));
         }
         router = router
             .layer(TraceLayer::new_for_http())
-            .layer(middleware::catch_panic(self.settings.debug));
-        #[cfg(feature = "csrf")]
-        if self.settings.csrf {
-            router = router.layer(DefaultBodyLimit::max(csrf::LIMIT));
+            .layer(catch_panic(self.settings.debug));
+        #[cfg(feature = "forgery")]
+        if self.settings.forgery {
+            router = router.layer(DefaultBodyLimit::max(forgery::LIMIT));
         }
         router
     }
@@ -76,4 +80,21 @@ impl App {
         let runtime = tokio::runtime::Runtime::new()?;
         runtime.block_on(self.run())
     }
+}
+
+fn catch_panic(
+    debug: bool,
+) -> CatchPanicLayer<impl FnMut(Box<dyn Any + Send + 'static>) -> Response + Clone> {
+    CatchPanicLayer::custom(move |panic: Box<dyn Any + Send + 'static>| {
+        let body = if debug {
+            panic
+                .downcast_ref::<&str>()
+                .map(|msg| msg.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "Internal Server Error".to_string())
+        } else {
+            "Internal Server Error".to_string()
+        };
+        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+    })
 }

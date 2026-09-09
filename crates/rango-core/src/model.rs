@@ -1,28 +1,35 @@
-use rango_store::{Row, StoreError, Value};
+use std::{marker::PhantomData, sync::Arc};
+
+use axum::{extract::FromRequestParts, http::request::Parts};
+
+use crate::{
+    error::Error,
+    store::{Row, Store, StoreError, Value},
+};
 
 #[derive(Clone, PartialEq)]
-pub enum Kind {
+pub enum Type {
     Id,
     Str,
     Int,
     Float,
     Bool,
     DateTime,
-    Optional(Box<Kind>),
+    Optional(Box<Type>),
 }
 
-impl Kind {
-    pub fn optional(self) -> Kind {
-        Kind::Optional(Box::new(self))
+impl Type {
+    pub fn optional(self) -> Type {
+        Type::Optional(Box::new(self))
     }
 
     pub fn is_optional(&self) -> bool {
-        matches!(self, &Kind::Optional(_))
+        matches!(self, &Type::Optional(_))
     }
 
-    pub fn flat(&self) -> &Kind {
+    pub fn flat(&self) -> &Type {
         match self {
-            Kind::Optional(inner) => inner.flat(),
+            Type::Optional(inner) => inner.flat(),
             kind => kind,
         }
     }
@@ -31,13 +38,13 @@ impl Kind {
 #[derive(Clone)]
 pub struct Field {
     pub name: &'static str,
-    pub kind: Kind,
+    pub kind: Type,
     pub unique: bool,
     pub default: Option<Value>,
 }
 
 impl Field {
-    pub fn new(name: &'static str, kind: Kind) -> Self {
+    pub fn new(name: &'static str, kind: Type) -> Self {
         Self {
             name,
             kind,
@@ -47,7 +54,7 @@ impl Field {
     }
 
     pub fn id() -> Self {
-        Self::new("id", Kind::Id)
+        Self::new("id", Type::Id)
     }
 
     pub fn unique(mut self) -> Self {
@@ -68,13 +75,15 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn from_row(row: &Row) -> Result<Self, StoreError>;
     fn set_id(&mut self, id: i64);
     fn id(&self) -> i64;
-}
 
-pub fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+    fn ddl() -> String {
+        let columns: Vec<String> = Self::fields().iter().map(column).collect();
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            Self::table(),
+            columns.join(", ")
+        )
+    }
 }
 
 fn literal(value: &Value) -> String {
@@ -90,23 +99,24 @@ fn literal(value: &Value) -> String {
                 "0".into()
             }
         }
+        Value::DateTime(at) => at.timestamp().to_string(),
     }
 }
 
-fn sql(kind: &Kind) -> &'static str {
+fn sql(kind: &Type) -> &'static str {
     match kind {
-        Kind::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
-        Kind::Str => "TEXT",
-        Kind::Int | Kind::DateTime => "INTEGER",
-        Kind::Float => "REAL",
-        Kind::Bool => "INTEGER",
-        Kind::Optional(inner) => sql(inner),
+        Type::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        Type::Str => "TEXT",
+        Type::Int | Type::DateTime => "INTEGER",
+        Type::Float => "REAL",
+        Type::Bool => "INTEGER",
+        Type::Optional(inner) => sql(inner),
     }
 }
 
 fn column(field: &Field) -> String {
     let mut base = sql(&field.kind).to_string();
-    if field.kind != Kind::Id {
+    if field.kind != Type::Id {
         if field.unique {
             base.push_str(" UNIQUE");
         }
@@ -120,11 +130,106 @@ fn column(field: &Field) -> String {
     format!("{} {}", field.name, base)
 }
 
-pub fn create_table<T: Model>() -> String {
-    let columns: Vec<String> = T::fields().iter().map(column).collect();
-    format!(
-        "CREATE TABLE IF NOT EXISTS {} ({})",
-        T::table(),
-        columns.join(", ")
-    )
+pub struct Repository<M = ()> {
+    store: Arc<dyn Store>,
+    marker: PhantomData<M>,
+}
+
+fn pairs<M: Model>(model: &M) -> Vec<(&'static str, Value)> {
+    let mut values = model.row().into_iter();
+    M::fields()
+        .into_iter()
+        .filter(|field| field.kind != Type::Id)
+        .map(|field| {
+            let value = values.next().unwrap_or(Value::Null);
+            let value = match field.default {
+                Some(ref default) if value == Value::Null => default.clone(),
+                _ => value,
+            };
+            (field.name, value)
+        })
+        .collect()
+}
+
+impl<M: Model> Repository<M> {
+    pub fn new(store: Arc<dyn Store>) -> Self {
+        Self {
+            store,
+            marker: PhantomData,
+        }
+    }
+
+    async fn ensure(&self) -> Result<(), StoreError> {
+        self.store.execute(&M::ddl(), &[]).await.map(|_| ())
+    }
+
+    pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
+        self.ensure().await?;
+        let pairs = pairs(model);
+        let columns: Vec<&str> = pairs.iter().map(|pair| pair.0).collect();
+        let params: Vec<Value> = pairs.into_iter().map(|pair| pair.1).collect();
+        let holes = vec!["?"; params.len()].join(", ");
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({holes})",
+            M::table(),
+            columns.join(", ")
+        );
+        self.store.execute(&sql, &params).await?;
+        let id = self.store.last_id(M::table()).await?;
+        model.set_id(id);
+        Ok(())
+    }
+
+    pub async fn get(&self, id: i64) -> Result<Option<M>, StoreError> {
+        self.ensure().await?;
+        let sql = format!("SELECT * FROM {} WHERE id = ?", M::table());
+        let rows = self.store.fetch(&sql, &[Value::int(id)]).await?;
+        rows.into_iter()
+            .next()
+            .map(|row| M::from_row(&row))
+            .transpose()
+    }
+
+    pub async fn all(&self) -> Result<Vec<M>, StoreError> {
+        self.ensure().await?;
+        let sql = format!("SELECT * FROM {} ORDER BY id", M::table());
+        let rows = self.store.fetch(&sql, &[]).await?;
+        rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn update(&self, model: &M) -> Result<(), StoreError> {
+        self.ensure().await?;
+        let mut sets = Vec::new();
+        let mut params = Vec::new();
+        for (name, value) in pairs(model) {
+            sets.push(format!("{name} = ?"));
+            params.push(value);
+        }
+        params.push(Value::int(model.id()));
+        let sql = format!("UPDATE {} SET {} WHERE id = ?", M::table(), sets.join(", "));
+        self.store.execute(&sql, &params).await?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, id: i64) -> Result<(), StoreError> {
+        self.ensure().await?;
+        let sql = format!("DELETE FROM {} WHERE id = ?", M::table());
+        self.store
+            .execute(&sql, &[Value::int(id)])
+            .await
+            .map(|_| ())
+    }
+}
+
+impl<M: Model> FromRequestParts<()> for Repository<M> {
+    type Rejection = Error;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &()) -> Result<Self, Self::Rejection> {
+        let store = parts
+            .extensions
+            .get::<Arc<dyn Store>>()
+            .cloned()
+            .ok_or_else(|| Error::Server("no store configured".into()))?;
+        Ok(Self::new(store))
+    }
 }

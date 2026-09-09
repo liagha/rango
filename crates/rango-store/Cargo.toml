@@ -11,3 +11,4 @@ sqlite = ["dep:rusqlite", "dep:tokio"]
 [dependencies]
 rusqlite = { version = "0.32", optional = true }
 tokio = { workspace = true, optional = true }
+chrono.workspace = true

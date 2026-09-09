@@ -1,5 +1,5 @@
 use helloworld::Message;
-use rango::model;
+use rango::chrono::Utc;
 use rango::prelude::*;
 use rango_auth::Current;
 
@@ -11,8 +11,8 @@ struct Index {
     user: String,
 }
 
-async fn index(repo: Repo<Message>, current: Current) -> Result<Response, Error> {
-    let messages = repo.all().await.map_err(Error::from)?;
+async fn index(repository: Repository<Message>, current: Current) -> Result<Response, Error> {
+    let messages = repository.all().await.map_err(Error::from)?;
     render(Index {
         name: "world".to_string(),
         messages,
@@ -72,7 +72,7 @@ async fn contact(req: Request) -> Result<Response, Error> {
 }
 
 async fn contact_post(
-    repo: Repo<Message>,
+    repository: Repository<Message>,
     headers: HeaderMap,
     Form(form): Form<Contact>,
 ) -> Result<Response, Error> {
@@ -82,9 +82,9 @@ async fn contact_post(
             id: 0,
             name: form.name,
             message: form.message,
-            created: model::now(),
+            created: Utc::now(),
         };
-        repo.save(&mut message).await.map_err(Error::from)?;
+        repository.save(&mut message).await.map_err(Error::from)?;
         Ok(redirect("/thanks"))
     } else {
         render(ContactPage {
@@ -117,7 +117,7 @@ fn hint(store: &std::sync::Arc<dyn rango::Store>) {
         .build()
         .unwrap()
         .block_on(async move {
-            let empty = Repo::<rango_auth::User>::new(store)
+            let empty = Repository::<rango_auth::User>::new(store)
                 .all()
                 .await
                 .unwrap_or_default()

@@ -13,7 +13,7 @@
 </div>
 {% endif %}
 <form method="post">
-<input type="hidden" name="csrf" value="{{ token }}">
+<input type="hidden" name="forgery" value="{{ token }}">
 {% for input in inputs %}
 <div class="field">{{ input|safe }}</div>
 {% endfor %}

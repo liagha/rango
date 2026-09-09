@@ -1,6 +1,5 @@
 use askama::Template;
 use axum::{
-    http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{MethodRouter, get},
 };
@@ -20,10 +19,6 @@ pub fn render<T: Template>(template: T) -> Result<Response, Error> {
 
 pub fn redirect(to: &str) -> Response {
     Redirect::to(to).into_response()
-}
-
-pub fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
 pub trait View: Clone + Send + Sync + 'static {

@@ -42,6 +42,7 @@ fn bind(values: &[Value]) -> Vec<SqValue> {
             Value::Float(value) => SqValue::Real(*value),
             Value::Str(value) => SqValue::Text(value.clone()),
             Value::Bool(value) => SqValue::Integer(if *value { 1 } else { 0 }),
+            Value::DateTime(at) => SqValue::Integer(at.timestamp()),
         })
         .collect()
 }

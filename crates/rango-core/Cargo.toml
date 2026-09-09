@@ -8,8 +8,8 @@ license.workspace = true
 name = "rango"
 
 [features]
-default = ["csrf", "sqlite"]
-csrf = ["dep:uuid", "dep:serde_urlencoded"]
+default = ["forgery", "sqlite"]
+forgery = ["dep:uuid", "dep:serde_urlencoded"]
 sqlite = ["rango-store/sqlite"]
 
 [dependencies]
@@ -21,6 +21,7 @@ tower-http.workspace = true
 rango-store.workspace = true
 serde.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
+chrono.workspace = true
 uuid = { workspace = true, optional = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true

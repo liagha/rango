@@ -5,6 +5,8 @@ pub mod sqlite;
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
+use chrono::{DateTime, Utc};
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -12,6 +14,7 @@ pub enum Value {
     Float(f64),
     Str(String),
     Bool(bool),
+    DateTime(DateTime<Utc>),
 }
 
 impl Value {
@@ -29,6 +32,10 @@ impl Value {
 
     pub fn bool(v: bool) -> Self {
         Self::Bool(v)
+    }
+
+    pub fn datetime(at: DateTime<Utc>) -> Self {
+        Self::DateTime(at)
     }
 }
 
@@ -68,6 +75,16 @@ impl Row {
             Some(Value::Bool(value)) => Ok(*value),
             Some(Value::Int(value)) => Ok(*value != 0),
             _ => Err(StoreError::Value(format!("row column {i} not bool"))),
+        }
+    }
+
+    pub fn datetime(&self, i: usize) -> Result<DateTime<Utc>, StoreError> {
+        let bad = || StoreError::Value(format!("row column {i} not datetime"));
+        match self.values.get(i) {
+            Some(Value::DateTime(at)) => Ok(*at),
+            Some(Value::Int(stamp)) => DateTime::from_timestamp(*stamp, 0).ok_or_else(bad),
+            Some(Value::Str(text)) => text.parse::<DateTime<Utc>>().map_err(|_| bad()),
+            _ => Err(bad()),
         }
     }
 }

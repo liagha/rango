@@ -4,9 +4,9 @@ pub struct Settings {
     pub host: String,
     pub port: u16,
     pub debug: bool,
-    pub csrf: bool,
+    pub forgery: bool,
     pub secret: String,
-    pub static_dir: PathBuf,
+    pub assets: PathBuf,
 }
 
 impl Settings {
@@ -16,9 +16,9 @@ impl Settings {
             host: "127.0.0.1".to_string(),
             port: 8000,
             debug: true,
-            csrf: true,
+            forgery: true,
             secret: "changeme".to_string(),
-            static_dir: cwd.join("static"),
+            assets: cwd.join("assets"),
         }
     }
 
@@ -32,8 +32,8 @@ impl Settings {
         self
     }
 
-    pub fn csrf(mut self, on: bool) -> Self {
-        self.csrf = on;
+    pub fn forgery(mut self, on: bool) -> Self {
+        self.forgery = on;
         self
     }
 
@@ -43,7 +43,7 @@ impl Settings {
     }
 
     pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.static_dir = dir.into().join("static");
+        self.assets = dir.into().join("assets");
         self
     }
 }
