@@ -5,7 +5,7 @@ use sea_orm::{
     Value as SeaValue,
 };
 
-use crate::{BoxFuture, ColumnKind, Row, Rows, Store, StoreError, Value};
+use crate::{BoxFuture, Column, ColumnKind, Row, Rows, Store, StoreError, Value};
 
 pub struct Sqlite {
     conn: DatabaseConnection,
@@ -64,6 +64,19 @@ fn statement(sql: &str, params: &[Value]) -> Statement {
     Statement::from_sql_and_values(DbBackend::Sqlite, sql, bind(params))
 }
 
+fn affinity_of(sql: &str) -> ColumnKind {
+    let sql = sql.to_uppercase();
+    if sql.contains("INT") {
+        ColumnKind::Integer
+    } else if sql.contains("CHAR") || sql.contains("CLOB") || sql.contains("TEXT") {
+        ColumnKind::Text
+    } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
+        ColumnKind::Real
+    } else {
+        ColumnKind::Text
+    }
+}
+
 impl Store for Sqlite {
     fn execute<'a>(
         &'a self,
@@ -100,7 +113,7 @@ impl Store for Sqlite {
         })
     }
 
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<String>, StoreError>> {
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
         let table = table.to_string();
         Box::pin(async move {
             let rows = self
@@ -113,11 +126,18 @@ impl Store for Sqlite {
                 .map_err(sql_err)?;
             let mut out = Vec::new();
             for row in &rows {
-                match row.try_get_by_index::<Option<String>>(1) {
-                    Ok(Some(name)) => out.push(name),
-                    Ok(None) => {}
+                let name = match row.try_get_by_index::<Option<String>>(1) {
+                    Ok(name) => name.unwrap_or_default(),
                     Err(fail) => return Err(sql_err(fail)),
-                }
+                };
+                let sql = match row.try_get_by_index::<Option<String>>(2) {
+                    Ok(sql) => sql.unwrap_or_default(),
+                    Err(fail) => return Err(sql_err(fail)),
+                };
+                out.push(Column {
+                    name,
+                    kind: affinity_of(&sql),
+                });
             }
             Ok(out)
         })
@@ -141,5 +161,88 @@ impl Store for Sqlite {
                 None => Err(StoreError::Value("no last id".into())),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store() -> Arc<dyn Store> {
+        let path = std::env::temp_dir().join(format!("rango-test-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        open(&path).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn roundtrip() {
+        let db = store().await;
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, score REAL, flag INTEGER, at INTEGER)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO t (name, age, score, flag, at) VALUES (?, ?, ?, ?, ?)",
+            &[
+                Value::str("a"),
+                Value::int(1),
+                Value::float(1.5),
+                Value::bool(true),
+                Value::int(1700000001),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.last_id("t").await.unwrap(), 1);
+        let kinds = [
+            ColumnKind::Integer,
+            ColumnKind::Text,
+            ColumnKind::Integer,
+            ColumnKind::Real,
+            ColumnKind::Integer,
+            ColumnKind::Integer,
+        ];
+        let rows = db
+            .fetch("SELECT * FROM t ORDER BY id", &[], &kinds)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].str(1).unwrap(), "a");
+        assert_eq!(rows[0].int(2).unwrap(), 1);
+        assert_eq!(rows[0].float(3).unwrap(), 1.5);
+        assert!(rows[0].bool(4).unwrap());
+        assert_eq!(rows[0].datetime(5).unwrap().timestamp(), 1700000001);
+        let cols = db.columns("t").await.unwrap();
+        assert_eq!(
+            cols.iter().map(|col| col.name.as_str()).collect::<Vec<_>>(),
+            vec!["id", "name", "age", "score", "flag", "at"]
+        );
+        let count = db
+            .fetch("SELECT COUNT(*) FROM t", &[], &[ColumnKind::Integer])
+            .await
+            .unwrap();
+        assert_eq!(count[0].int(0).unwrap(), 1);
+        let touched = db
+            .execute(
+                "UPDATE t SET age = ? WHERE id = ?",
+                &[Value::int(2), Value::int(1)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(touched, 1);
+        let gone = db
+            .execute("DELETE FROM t WHERE id = ?", &[Value::int(1)])
+            .await
+            .unwrap();
+        assert_eq!(gone, 1);
+    }
+
+    #[tokio::test]
+    async fn missing() {
+        let db = store().await;
+        assert!(db.columns("nope").await.unwrap().is_empty());
+        assert!(db.fetch("SELECT * FROM nope", &[], &[]).await.is_err());
     }
 }

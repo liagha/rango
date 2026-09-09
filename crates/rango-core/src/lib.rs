@@ -10,7 +10,7 @@ pub mod urls;
 pub mod view;
 
 pub use rango_store as store;
-pub use store::{ColumnKind, Row, Store, StoreError, Value};
+pub use store::{Column, ColumnKind, Row, Store, StoreError, Value};
 
 pub use app::App;
 pub use error::Error;

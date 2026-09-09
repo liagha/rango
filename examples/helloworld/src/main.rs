@@ -105,8 +105,8 @@ async fn thanks() -> Result<Response, Error> {
 
 fn secret() -> String {
     std::env::var("RANGO_SECRET").unwrap_or_else(|_| {
-        eprintln!("warning: RANGO_SECRET is not set, using an insecure default");
-        "rango-dev-secret".into()
+        eprintln!("error: set RANGO_SECRET to a long random value");
+        std::process::exit(1);
     })
 }
 
@@ -122,9 +122,10 @@ async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
 }
 
 fn main() {
+    let secret = secret();
     let settings = Settings::new()
         .base_dir(env!("CARGO_MANIFEST_DIR"))
-        .secret(secret());
+        .secret(&secret);
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
     let store = rango::tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -135,7 +136,7 @@ fn main() {
             hint(&store).await;
             store
         });
-    let auth = rango_auth::Auth::new(&settings.secret).signup(true);
+    let auth = rango_auth::Auth::new(&secret).signup(true);
     let panel = rango_admin::Admin::new().model::<Message>();
     App::new(settings)
         .store(store)

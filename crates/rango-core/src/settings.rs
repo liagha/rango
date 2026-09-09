@@ -5,7 +5,7 @@ pub struct Settings {
     pub port: u16,
     pub debug: bool,
     pub forgery: bool,
-    pub secret: String,
+    pub secret: Option<String>,
     pub assets: PathBuf,
 }
 
@@ -17,7 +17,7 @@ impl Settings {
             port: 8000,
             debug: true,
             forgery: true,
-            secret: "changeme".to_string(),
+            secret: None,
             assets: cwd.join("assets"),
         }
     }
@@ -38,7 +38,7 @@ impl Settings {
     }
 
     pub fn secret(mut self, secret: impl Into<String>) -> Self {
-        self.secret = secret.into();
+        self.secret = Some(secret.into());
         self
     }
 

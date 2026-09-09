@@ -69,6 +69,9 @@ impl App {
     }
 
     pub async fn run(self) -> Result<(), std::io::Error> {
+        if self.settings.secret.is_none() {
+            return Err(std::io::Error::other("set a secret before serving"));
+        }
         let address = (self.settings.host.as_str(), self.settings.port);
         let listener = tokio::net::TcpListener::bind(address).await?;
         tracing::info!("rango running on http://{}", self.settings.port);

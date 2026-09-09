@@ -39,11 +39,17 @@ impl Value {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnKind {
     Integer,
     Real,
     Text,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Column {
+    pub name: String,
+    pub kind: ColumnKind,
 }
 
 #[derive(Clone, Debug)]
@@ -139,7 +145,7 @@ pub trait Store: Send + Sync + 'static {
         kinds: &'a [ColumnKind],
     ) -> BoxFuture<'a, Result<Rows, StoreError>>;
 
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<String>, StoreError>> {
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
         let _ = table;
         Box::pin(async { Err(StoreError::Unsupported("columns".into())) })
     }

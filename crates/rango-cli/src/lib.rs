@@ -72,6 +72,10 @@ pub async fn migrate(
         done += 1;
         match store.columns(schema.table).await {
             Ok(have) => {
+                for sql in schema.rename(&have) {
+                    store.execute(&sql, &[]).await?;
+                    done += 1;
+                }
                 for sql in schema.alter(&have) {
                     store.execute(&sql, &[]).await?;
                     done += 1;
@@ -104,4 +108,54 @@ pub fn prompt_password() -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> impl Iterator<Item = String> {
+        raw.iter().map(|item| item.to_string())
+    }
+
+    #[test]
+    fn migrate() {
+        assert!(matches!(
+            parse(args(&["migrate"])).unwrap(),
+            Command::Migrate { drop: false }
+        ));
+        assert!(matches!(
+            parse(args(&["migrate", "--drop"])).unwrap(),
+            Command::Migrate { drop: true }
+        ));
+        assert!(parse(args(&["migrate", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn create() {
+        let Command::Create(Create::User {
+            username,
+            password,
+            superuser,
+        }) = parse(args(&[
+            "create",
+            "user",
+            "--username",
+            "u",
+            "--password",
+            "p",
+            "--super",
+        ]))
+        .unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(username, Some("u".into()));
+        assert_eq!(password, Some("p".into()));
+        assert!(superuser);
+        assert!(parse(args(&["create", "group"])).is_err());
+        assert!(parse(args(&["create"])).is_err());
+        assert!(parse(args(&["bogus"])).is_err());
+        assert!(parse(args(&[])).is_err());
+    }
 }

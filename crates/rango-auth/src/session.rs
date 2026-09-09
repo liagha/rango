@@ -189,3 +189,59 @@ fn hex_decode(raw: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cookie_ok() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "a=1; session=abc; b=2".parse().unwrap());
+        assert_eq!(cookie(&headers, "session"), Some("abc".into()));
+        assert_eq!(cookie(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn claim_ok() {
+        assert_eq!(claim("7.999.ab12"), Some((7, 999, "ab12".into())));
+        assert_eq!(claim("x"), None);
+        assert_eq!(claim("1.2"), None);
+        assert_eq!(claim("1.2.3.4"), None);
+        assert_eq!(claim(""), None);
+    }
+
+    #[cfg(feature = "views")]
+    #[test]
+    fn codec() {
+        let sig = sign("secret", 7, 999);
+        assert!(verify("secret", 7, 999, &sig));
+        assert!(!verify("other", 7, 999, &sig));
+        assert!(!verify("secret", 8, 999, &sig));
+        assert!(!verify("secret", 7, 999, "deadbeef"));
+    }
+
+    #[cfg(feature = "views")]
+    #[test]
+    fn next_filter() {
+        assert_eq!(safe_next(Some("/admin/".into())), Some("/admin/".into()));
+        assert_eq!(safe_next(Some("https://evil.example".into())), None);
+        assert_eq!(safe_next(Some("//evil.example".into())), None);
+        assert_eq!(safe_next(None), None);
+    }
+
+    #[cfg(feature = "views")]
+    #[test]
+    fn lockout() {
+        let mut attempts = Attempts::new(3, 15);
+        assert!(!attempts.blocked("u"));
+        attempts.fail("u");
+        attempts.fail("u");
+        assert!(!attempts.blocked("u"));
+        attempts.fail("u");
+        assert!(attempts.blocked("u"));
+        assert!(!attempts.blocked("other"));
+        attempts.clear("u");
+        assert!(!attempts.blocked("u"));
+    }
+}

@@ -104,3 +104,84 @@ pub(crate) fn href(base: &str, extra: &str) -> String {
         format!("?{base}&{extra}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields() -> Vec<Field> {
+        vec![
+            Field::id(),
+            Field::new("name", Type::Str),
+            Field::new("age", Type::Int),
+        ]
+    }
+
+    fn row() -> Vec<Value> {
+        vec![Value::int(1), Value::str("Ann"), Value::int(30)]
+    }
+
+    #[test]
+    fn search() {
+        let fields = fields();
+        let values = row();
+        let params = HashMap::new();
+        assert!(keep(&fields, &values, "ann", &params, &[1]));
+        assert!(!keep(&fields, &values, "bob", &params, &[1]));
+        assert!(keep(&fields, &values, "", &params, &[1]));
+    }
+
+    #[test]
+    fn filter() {
+        let fields = fields();
+        let values = row();
+        let mut params = HashMap::new();
+        params.insert("name".into(), "an".into());
+        assert!(keep(&fields, &values, "", &params, &[1]));
+        params.insert("name".into(), "bo".into());
+        assert!(!keep(&fields, &values, "", &params, &[1]));
+        params.insert("name".into(), "".into());
+        params.insert("age".into(), "30".into());
+        assert!(keep(&fields, &values, "", &params, &[1]));
+        params.insert("age".into(), "31".into());
+        assert!(!keep(&fields, &values, "", &params, &[1]));
+    }
+
+    #[test]
+    fn order() {
+        assert_eq!(
+            compare(Some(&Value::Int(1)), Some(&Value::Int(2))),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare(Some(&Value::Null), Some(&Value::Int(1))),
+            Ordering::Greater
+        );
+        assert_eq!(compare(None, Some(&Value::Null)), Ordering::Equal);
+    }
+
+    #[test]
+    fn sort() {
+        let fields = fields();
+        let mut rows = vec![
+            vec![Value::int(2), Value::str("Bo"), Value::int(20)],
+            vec![Value::int(1), Value::str("Ann"), Value::int(30)],
+        ];
+        sort_rows(&fields, &mut rows, "age");
+        assert_eq!(rows[0][0], Value::int(2));
+        sort_rows(&fields, &mut rows, "-age");
+        assert_eq!(rows[0][0], Value::int(1));
+        sort_rows(&fields, &mut rows, "bogus");
+        assert_eq!(rows[0][0], Value::int(1));
+    }
+
+    #[test]
+    fn links() {
+        let mut params = HashMap::new();
+        params.insert("q".into(), "x".into());
+        params.insert("page".into(), "2".into());
+        assert_eq!(encode(&params, &["page"]), "q=x");
+        assert_eq!(href("", "page=2"), "?page=2");
+        assert_eq!(href("q=x", "page=2"), "?q=x&page=2");
+    }
+}

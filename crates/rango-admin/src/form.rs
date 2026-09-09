@@ -134,3 +134,50 @@ fn escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(kind: Type) -> Field {
+        Field::new("f", kind)
+    }
+
+    fn raw(text: &str) -> String {
+        text.to_string()
+    }
+
+    #[test]
+    fn values() {
+        assert_eq!(
+            value(&field(Type::Str), Some(&raw("hi"))).unwrap(),
+            Value::str("hi")
+        );
+        assert_eq!(
+            value(&field(Type::Int), Some(&raw("3"))).unwrap(),
+            Value::int(3)
+        );
+        assert!(value(&field(Type::Int), Some(&raw("x"))).is_err());
+        assert!(value(&field(Type::Int), None).is_err());
+        assert_eq!(value(&field(Type::Bool), None).unwrap(), Value::bool(false));
+        assert_eq!(
+            value(&field(Type::Bool), Some(&raw("on"))).unwrap(),
+            Value::bool(true)
+        );
+        let optional = Field::new("f", Type::Str.optional());
+        assert_eq!(value(&optional, None).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn dates() {
+        let field = field(Type::DateTime);
+        match value(&field, Some(&raw("2026-09-09T12:30"))).unwrap() {
+            Value::DateTime(at) => {
+                assert_eq!(at.format("%Y-%m-%dT%H:%M").to_string(), "2026-09-09T12:30")
+            }
+            _ => panic!("not a datetime"),
+        }
+        assert!(value(&field, Some(&raw("not-a-date"))).is_err());
+        assert!(value(&field, None).is_err());
+    }
+}

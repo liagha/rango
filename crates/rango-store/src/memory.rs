@@ -218,3 +218,89 @@ impl Store for Memory {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> Memory {
+        Memory::default()
+    }
+
+    #[tokio::test]
+    async fn roundtrip() {
+        let db = store();
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute("INSERT INTO t (name) VALUES (?)", &[Value::str("a")])
+            .await
+            .unwrap();
+        assert_eq!(db.last_id("t").await.unwrap(), 1);
+        let rows = db
+            .fetch("SELECT * FROM t ORDER BY id", &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].str(1).unwrap(), "a");
+        let one = db
+            .fetch("SELECT * FROM t WHERE id = ?", &[Value::int(1)], &[])
+            .await
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        let count = db.fetch("SELECT COUNT(*) FROM t", &[], &[]).await.unwrap();
+        assert_eq!(count[0].int(0).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn change() {
+        let db = store();
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, age INTEGER)",
+            &[],
+        )
+        .await
+        .unwrap();
+        db.execute("INSERT INTO t (age) VALUES (?)", &[Value::int(1)])
+            .await
+            .unwrap();
+        let touched = db
+            .execute(
+                "UPDATE t SET age = ? WHERE id = ?",
+                &[Value::int(2), Value::int(1)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(touched, 1);
+        let rows = db
+            .fetch("SELECT * FROM t ORDER BY id", &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].int(1).unwrap(), 2);
+        let gone = db
+            .execute("DELETE FROM t WHERE id = ?", &[Value::int(1)])
+            .await
+            .unwrap();
+        assert_eq!(gone, 1);
+        assert!(
+            db.fetch("SELECT * FROM t ORDER BY id", &[], &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing() {
+        let db = store();
+        assert!(
+            db.fetch("SELECT * FROM nope ORDER BY id", &[], &[])
+                .await
+                .is_err()
+        );
+        assert!(db.columns("nope").await.is_err());
+    }
+}

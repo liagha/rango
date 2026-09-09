@@ -4,7 +4,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use crate::{
     error::Error,
-    store::{ColumnKind, Row, Store, StoreError, Value},
+    store::{Column, ColumnKind, Row, Store, StoreError, Value},
 };
 
 #[derive(Clone, PartialEq)]
@@ -103,13 +103,16 @@ impl Schema {
         )
     }
 
-    pub fn alter(&self, have: &[String]) -> Vec<String> {
+    pub fn alter(&self, have: &[Column]) -> Vec<String> {
+        let moved = self.moved(have);
         let mut out = Vec::new();
         for field in &self.fields {
             if field.kind == Type::Id {
                 continue;
             }
-            if !have.iter().any(|name| name == field.name) {
+            if !have.iter().any(|col| col.name == field.name)
+                && !moved.iter().any(|(_, name)| name == field.name)
+            {
                 out.push(format!(
                     "ALTER TABLE \"{}\" ADD COLUMN {}",
                     self.table,
@@ -120,17 +123,60 @@ impl Schema {
         out
     }
 
-    pub fn drop(&self, have: &[String]) -> Vec<String> {
+    pub fn drop(&self, have: &[Column]) -> Vec<String> {
+        let moved = self.moved(have);
         let mut out = Vec::new();
-        for name in have {
-            if name == "id" {
+        for col in have {
+            if col.name == "id" {
                 continue;
             }
-            if !self.fields.iter().any(|field| field.name == name) {
+            if !self.fields.iter().any(|field| field.name == col.name)
+                && !moved.iter().any(|(name, _)| name == &col.name)
+            {
                 out.push(format!(
-                    "ALTER TABLE \"{}\" DROP COLUMN \"{name}\"",
-                    self.table
+                    "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
+                    self.table, col.name
                 ));
+            }
+        }
+        out
+    }
+
+    pub fn rename(&self, have: &[Column]) -> Vec<String> {
+        self.moved(have)
+            .into_iter()
+            .map(|(old, name)| {
+                format!(
+                    "ALTER TABLE \"{}\" RENAME COLUMN \"{old}\" TO \"{name}\"",
+                    self.table
+                )
+            })
+            .collect()
+    }
+
+    fn moved(&self, have: &[Column]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for kind in [ColumnKind::Integer, ColumnKind::Real, ColumnKind::Text] {
+            let gone: Vec<&String> = have
+                .iter()
+                .filter(|col| {
+                    col.name != "id"
+                        && col.kind == kind
+                        && !self.fields.iter().any(|field| field.name == col.name)
+                })
+                .map(|col| &col.name)
+                .collect();
+            let fresh: Vec<&Field> = self
+                .fields
+                .iter()
+                .filter(|field| {
+                    field.kind != Type::Id
+                        && affinity(&field.kind) == kind
+                        && !have.iter().any(|col| col.name == field.name)
+                })
+                .collect();
+            if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
+                out.push(((*old).clone(), new.name.to_string()));
             }
         }
         out
@@ -305,5 +351,112 @@ impl<M: Model> FromRequestParts<()> for Repository<M> {
             .cloned()
             .ok_or_else(|| Error::Server("no store configured".into()))?;
         Ok(Self::new(store))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Column;
+
+    #[derive(Clone)]
+    struct Post {
+        id: i64,
+        title: String,
+    }
+
+    impl Model for Post {
+        fn table() -> &'static str {
+            "posts"
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![Field::id(), Field::new("title", Type::Str)]
+        }
+
+        fn row(&self) -> Vec<Value> {
+            vec![Value::str(&self.title)]
+        }
+
+        fn from_row(row: &Row) -> Result<Self, StoreError> {
+            Ok(Self {
+                id: row.int(0)?,
+                title: row.str(1)?,
+            })
+        }
+
+        fn set_id(&mut self, id: i64) {
+            self.id = id;
+        }
+
+        fn id(&self) -> i64 {
+            self.id
+        }
+    }
+
+    fn col(name: &str, kind: ColumnKind) -> Column {
+        Column {
+            name: name.to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn ddl() {
+        assert_eq!(
+            Post::schema().ddl(),
+            "CREATE TABLE IF NOT EXISTS \"posts\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"title\" TEXT NOT NULL)"
+        );
+    }
+
+    #[test]
+    fn adds() {
+        let schema = Post::schema();
+        let have = vec![
+            col("id", ColumnKind::Integer),
+            col("title", ColumnKind::Text),
+        ];
+        assert!(schema.alter(&have).is_empty());
+        let missing = vec![col("id", ColumnKind::Integer)];
+        assert_eq!(schema.alter(&missing).len(), 1);
+    }
+
+    #[test]
+    fn drops() {
+        let schema = Post::schema();
+        let have = vec![
+            col("id", ColumnKind::Integer),
+            col("title", ColumnKind::Text),
+            col("junk", ColumnKind::Text),
+        ];
+        let drop = schema.drop(&have);
+        assert_eq!(drop.len(), 1);
+        assert!(schema.drop(&have[..2]).is_empty());
+    }
+
+    #[test]
+    fn renames() {
+        let schema = Post::schema();
+        let have = vec![
+            col("id", ColumnKind::Integer),
+            col("name", ColumnKind::Text),
+        ];
+        let rename = schema.rename(&have);
+        assert_eq!(rename.len(), 1);
+        assert!(schema.alter(&have).is_empty());
+        assert!(schema.drop(&have).is_empty());
+        let mixed = vec![
+            col("id", ColumnKind::Integer),
+            col("name", ColumnKind::Text),
+            col("age", ColumnKind::Integer),
+        ];
+        assert_eq!(schema.rename(&mixed).len(), 1);
+        assert!(schema.alter(&mixed).is_empty());
+        assert_eq!(schema.drop(&mixed).len(), 1);
+    }
+
+    #[test]
+    fn affinities() {
+        assert_eq!(kinds::<Post>(), vec![ColumnKind::Integer, ColumnKind::Text]);
     }
 }
