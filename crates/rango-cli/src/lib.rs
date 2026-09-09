@@ -16,12 +16,13 @@ pub enum Create {
     },
 }
 
+#[allow(clippy::while_let_on_iterator)]
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     match args.next().as_deref() {
         Some("migrate") => {
             let mut drop = false;
-            for arg in args.by_ref() {
+            while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--drop" => drop = true,
                     other => return Err(format!("unknown argument {other}")),
@@ -34,7 +35,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
                 let mut username = None;
                 let mut password = None;
                 let mut superuser = false;
-                for arg in args.by_ref() {
+                while let Some(arg) = args.next() {
                     match arg.as_str() {
                         "--username" => username = args.next(),
                         "--password" => password = args.next(),

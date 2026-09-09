@@ -127,7 +127,10 @@ impl Schema {
                 continue;
             }
             if !self.fields.iter().any(|field| field.name == name) {
-                out.push(format!("ALTER TABLE \"{}\" DROP COLUMN \"{name}\"", self.table));
+                out.push(format!(
+                    "ALTER TABLE \"{}\" DROP COLUMN \"{name}\"",
+                    self.table
+                ));
             }
         }
         out
@@ -273,7 +276,11 @@ impl<M: Model> Repository<M> {
             params.push(value);
         }
         params.push(Value::int(model.id()));
-        let sql = format!("UPDATE \"{}\" SET {} WHERE id = ?", M::table(), sets.join(", "));
+        let sql = format!(
+            "UPDATE \"{}\" SET {} WHERE id = ?",
+            M::table(),
+            sets.join(", ")
+        );
         self.store.execute(&sql, &params).await?;
         Ok(())
     }
