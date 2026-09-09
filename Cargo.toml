@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rango-admin",
+    "crates/rango-auth",
     "crates/rango-core",
     "crates/rango-store",
     "examples/helloworld",
@@ -14,6 +15,7 @@ license = "MIT"
 
 [workspace.dependencies]
 rango-admin = { path = "crates/rango-admin", version = "0.1.0" }
+rango-auth = { path = "crates/rango-auth", version = "0.1.0" }
 rango-core = { path = "crates/rango-core", version = "0.1.0" }
 rango-store = { path = "crates/rango-store", version = "0.1.0", default-features = false }
 

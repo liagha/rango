@@ -1,11 +1,13 @@
 use rango::model;
 use rango::prelude::*;
+use rango_auth::Current;
 
 #[derive(Template)]
 #[template(path = "index.html", askama = rango::askama)]
 struct Index {
     name: String,
     messages: Vec<Message>,
+    user: String,
 }
 
 #[derive(Clone)]
@@ -56,11 +58,12 @@ impl Model for Message {
     }
 }
 
-async fn index(repo: Repo<Message>) -> Result<Response, Error> {
+async fn index(repo: Repo<Message>, current: Current) -> Result<Response, Error> {
     let messages = repo.all().await.map_err(Error::from)?;
     render(Index {
         name: "world".to_string(),
         messages,
+        user: current.0.map(|user| user.username).unwrap_or_default(),
     })
 }
 
@@ -151,22 +154,58 @@ async fn portal() -> Result<Response, Error> {
     Ok(redirect("/admin/"))
 }
 
+fn secret() -> String {
+    std::env::var("RANGO_SECRET").unwrap_or_else(|_| {
+        eprintln!("warning: RANGO_SECRET is not set, using an insecure default");
+        "rango-dev-secret".into()
+    })
+}
+
+fn seed(store: &std::sync::Arc<dyn rango::Store>) {
+    let store = store.clone();
+    rango::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let empty = Repo::<rango_auth::User>::new(store.clone())
+                .all()
+                .await
+                .unwrap_or_default()
+                .is_empty();
+            if empty {
+                match rango_auth::User::register(store, "admin", "adminadmin").await {
+                    Ok(user) => eprintln!("seeded login {} / adminadmin", user.username),
+                    Err(fail) => eprintln!("seed failed: {fail}"),
+                }
+            }
+        });
+}
+
 fn main() {
-    let settings = Settings::new().base_dir(env!("CARGO_MANIFEST_DIR"));
+    let settings = Settings::new()
+        .base_dir(env!("CARGO_MANIFEST_DIR"))
+        .secret(secret());
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
+    let store = rango::store::sqlite::open(&db).unwrap();
+    seed(&store);
+    let auth = rango_auth::Auth::new(&settings.secret);
     let admin = rango_admin::Admin::new().model::<Message>();
     App::new(settings)
-        .store(rango::store::sqlite::open(&db).unwrap())
+        .store(store)
         .urls(
-            Routes::new()
-                .route("/", get(index))
-                .route("/about", get_view(About))
-                .route("/kick", get(kick))
-                .route("/contact", get(contact).post(contact_post))
-                .route("/thanks", get(thanks))
-                .route("/admin", get(portal)),
+            auth.session(
+                Routes::new()
+                    .route("/", get(index))
+                    .route("/about", get_view(About))
+                    .route("/kick", get(kick))
+                    .route("/contact", get(contact).post(contact_post))
+                    .route("/thanks", get(thanks))
+                    .route("/admin", get(portal)),
+            ),
         )
-        .mount("/admin/", admin.routes())
+        .urls(auth.routes())
+        .mount("/admin/", auth.require_login(admin.routes()))
         .mount_static()
         .serve()
         .unwrap();

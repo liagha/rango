@@ -5,6 +5,7 @@ pub struct Settings {
     pub port: u16,
     pub debug: bool,
     pub csrf: bool,
+    pub secret: String,
     pub static_dir: PathBuf,
 }
 
@@ -16,6 +17,7 @@ impl Settings {
             port: 8000,
             debug: true,
             csrf: true,
+            secret: "changeme".to_string(),
             static_dir: cwd.join("static"),
         }
     }
@@ -32,6 +34,11 @@ impl Settings {
 
     pub fn csrf(mut self, on: bool) -> Self {
         self.csrf = on;
+        self
+    }
+
+    pub fn secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = secret.into();
         self
     }
 

@@ -6,6 +6,7 @@
 <h1>Hello, Rango!</h1>
 <p>This page is rendered with Askama through Rango.</p>
 <p>{% if name != "" %}Nice to meet you, {{ name }}.{% else %}What's your name?{% endif %}</p>
+<p>{% if !user.is_empty() %}Logged in as {{ user }} (<a href="/login">account</a>).{% else %}<a href="/login">Log in</a> · <a href="/admin/">Admin</a>{% endif %}</p>
 
 <h2>Messages</h2>
 <ul>
