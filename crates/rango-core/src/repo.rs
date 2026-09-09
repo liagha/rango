@@ -75,6 +75,30 @@ impl<M: Model> Repo<M> {
         rows.iter().map(|row| M::from_row(row)).collect()
     }
 
+    pub async fn update(&self, model: &M) -> Result<(), StoreError> {
+        self.ensure().await?;
+        let fields = M::fields();
+        let mut values = model.row().into_iter();
+        let mut sets = Vec::new();
+        let mut params = Vec::new();
+        for field in &fields {
+            if field.kind == Kind::Id {
+                continue;
+            }
+            let value = values.next().unwrap_or(Value::Null);
+            let value = match field.default {
+                Some(ref default) if value == Value::Null => default.clone(),
+                _ => value,
+            };
+            sets.push(format!("{} = ?", field.name));
+            params.push(value);
+        }
+        params.push(Value::int(model.id()));
+        let sql = format!("UPDATE {} SET {} WHERE id = ?", M::table(), sets.join(", "));
+        self.store.execute(&sql, &params).await?;
+        Ok(())
+    }
+
     pub async fn delete(&self, id: i64) -> Result<(), StoreError> {
         self.ensure().await?;
         let sql = format!("DELETE FROM {} WHERE id = ?", M::table());

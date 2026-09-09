@@ -67,6 +67,7 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn row(&self) -> Vec<Value>;
     fn from_row(row: &Row) -> Result<Self, StoreError>;
     fn set_id(&mut self, id: i64);
+    fn id(&self) -> i64;
 }
 
 pub fn now() -> i64 {

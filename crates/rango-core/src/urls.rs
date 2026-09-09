@@ -1,23 +1,30 @@
 use axum::{Router, routing::MethodRouter};
 
 pub struct Routes {
-    router: Router,
+    routes: Vec<(String, MethodRouter)>,
 }
 
 impl Routes {
     pub fn new() -> Self {
-        Self {
-            router: Router::new(),
-        }
+        Self { routes: Vec::new() }
     }
 
-    pub fn route(mut self, path: &'static str, method: MethodRouter) -> Self {
-        self.router = self.router.route(path, method);
+    pub fn route(mut self, path: impl Into<String>, method: MethodRouter) -> Self {
+        self.routes.push((path.into(), method));
+        self
+    }
+
+    pub fn merge(mut self, other: Routes) -> Self {
+        self.routes.extend(other.routes);
         self
     }
 
     pub fn into_router(self) -> Router {
-        self.router
+        let mut router = Router::new();
+        for (path, method) in self.routes {
+            router = router.route(&path, method);
+        }
+        router
     }
 }
 

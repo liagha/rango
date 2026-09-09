@@ -76,6 +76,22 @@ fn select(sql: &str) -> Result<(String, Query), StoreError> {
     }
 }
 
+fn update(sql: &str) -> Result<(String, usize), StoreError> {
+    let rest = sql
+        .strip_prefix("UPDATE ")
+        .ok_or_else(|| StoreError::Sql("expected update".into()))?;
+    let (name, set) = rest
+        .split_once(" SET ")
+        .ok_or_else(|| StoreError::Sql("bad update".into()))?;
+    let set = set
+        .strip_suffix(" WHERE id = ?")
+        .ok_or_else(|| StoreError::Sql("bad update".into()))?;
+    Ok((
+        name.trim().trim_matches('"').to_string(),
+        set.split(", ").count(),
+    ))
+}
+
 fn delete(sql: &str) -> Result<String, StoreError> {
     let rest = sql
         .strip_prefix("DELETE FROM ")
@@ -126,6 +142,28 @@ impl Store for Memory {
                 row.extend(params);
                 table.rows.push(Row { values: row });
                 return Ok(1);
+            }
+            if sql.starts_with("UPDATE ") {
+                let (name, count) = update(&sql)?;
+                let Some(Value::Int(id)) = params.last() else {
+                    return Err(StoreError::Value("expected id param".into()));
+                };
+                let table = tables
+                    .iter_mut()
+                    .find(|table| table.name == name)
+                    .ok_or_else(|| StoreError::Sql(format!("no table {name}")))?;
+                let mut touched = 0;
+                for row in &mut table.rows {
+                    if row_id(row) != *id {
+                        continue;
+                    }
+                    let mut values = Vec::with_capacity(count + 1);
+                    values.push(Value::Int(*id));
+                    values.extend(params.iter().take(count).cloned());
+                    row.values = values;
+                    touched += 1;
+                }
+                return Ok(touched);
             }
             if sql.starts_with("DELETE FROM ") {
                 let name = delete(&sql)?;

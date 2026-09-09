@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<style>body{font-family:sans-serif;max-width:60rem;margin:2rem auto}a{color:#06c}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.3rem .6rem}</style>
+</head>
+<body>
+<h1>{{ title }}</h1>
+<p><a href="new/">Add</a> · <a href="../">Admin</a></p>
+<table>
+<tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+{% for row in rows %}
+<tr>
+<td><a href="{{ row.id }}/">{{ row.id }}</a></td>
+{% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}
+</tr>
+{% endfor %}
+</table>
+</body>
+</html>

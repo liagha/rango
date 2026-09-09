@@ -1,0 +1,10 @@
+[package]
+name = "rango-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rango-core = { workspace = true, features = ["csrf"] }
+askama.workspace = true
+axum.workspace = true

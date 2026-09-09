@@ -50,6 +50,10 @@ impl Model for Message {
     fn set_id(&mut self, id: i64) {
         self.id = id;
     }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
 }
 
 async fn index(repo: Repo<Message>) -> Result<Response, Error> {
@@ -143,9 +147,14 @@ async fn thanks() -> Result<Response, Error> {
     render(Thanks)
 }
 
+async fn portal() -> Result<Response, Error> {
+    Ok(redirect("/admin/"))
+}
+
 fn main() {
     let settings = Settings::new().base_dir(env!("CARGO_MANIFEST_DIR"));
     let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
+    let admin = rango_admin::Admin::new().model::<Message>();
     App::new(settings)
         .store(rango::store::sqlite::open(&db).unwrap())
         .urls(
@@ -154,8 +163,10 @@ fn main() {
                 .route("/about", get_view(About))
                 .route("/kick", get(kick))
                 .route("/contact", get(contact).post(contact_post))
-                .route("/thanks", get(thanks)),
+                .route("/thanks", get(thanks))
+                .route("/admin", get(portal)),
         )
+        .mount("/admin/", admin.routes())
         .mount_static()
         .serve()
         .unwrap();

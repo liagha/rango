@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 rango-core.workspace = true
+rango-admin.workspace = true

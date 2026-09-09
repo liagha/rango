@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{ title }} {{ id }}</title>
+<style>body{font-family:sans-serif;max-width:40rem;margin:2rem auto}a{color:#06c}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.3rem .6rem}</style>
+</head>
+<body>
+<h1>{{ title }} {{ id }}</h1>
+<p><a href="edit/">Edit</a> · <a href="../">Back</a></p>
+<table>
+{% for pair in pairs %}
+<tr><th>{{ pair.name }}</th><td>{{ pair.value }}</td></tr>
+{% endfor %}
+</table>
+<form method="post" action="delete/">
+<input type="hidden" name="csrf" value="{{ token }}">
+<p><button type="submit">Delete</button></p>
+</form>
+</body>
+</html>
