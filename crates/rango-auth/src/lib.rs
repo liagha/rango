@@ -92,7 +92,7 @@ impl Auth {
                     move |current: Current,
                           headers: HeaderMap,
                           guard: Option<Extension<Token>>,
-                          Query(query): Query<NextQ>| {
+                          Query(query): Query<NextQuery>| {
                         let show = show.clone();
                         async move { show.show(current, headers, guard, query.next).await }
                     },
@@ -149,7 +149,7 @@ impl Auth {
                           guard: Option<Extension<Token>>,
                           Form(form): Form<SignupForm>| {
                         let signup_enter = signup_enter.clone();
-                        async move { signup_enter.join(store.0, headers, guard, form).await }
+                        async move { signup_enter.create(store.0, headers, guard, form).await }
                     },
                 ),
             );
@@ -177,12 +177,12 @@ impl Auth {
         if inside {
             next.run(req).await
         } else {
-            view::redirect(&redir(&auth.login, &req))
+            view::redirect(&login_url(&auth.login, &req))
         }
     }
 
     fn peek(&self, req: &Request) -> (Option<Claim>, Option<Arc<dyn Store>>) {
-        let raw = cookie(req.headers(), &self.cookie).and_then(|raw| parse(&raw));
+        let raw = cookie(req.headers(), &self.cookie).and_then(|raw| claim(&raw));
         let store = req.extensions().get::<Arc<dyn Store>>().cloned();
         (raw, store)
     }
@@ -193,7 +193,7 @@ impl Auth {
         if exp < model::now() {
             return None;
         }
-        if !check(&self.secret, id, exp, &sig) {
+        if !verify(&self.secret, id, exp, &sig) {
             return None;
         }
         Repo::<User>::new(store).get(id).await.ok()?
@@ -254,7 +254,7 @@ impl Auth {
     fn cookie_for(&self, user: &User) -> axum::http::HeaderValue {
         let exp = model::now() + self.days * 86400;
         let raw = format!("{}.{}.{}", user.id, exp, sign(&self.secret, user.id, exp));
-        baked(&self.cookie, &raw, exp - model::now())
+        set_cookie(&self.cookie, &raw, exp - model::now())
     }
 
     #[cfg(feature = "views")]
@@ -275,7 +275,7 @@ impl Auth {
     }
 
     #[cfg(feature = "views")]
-    async fn join(
+    async fn create(
         &self,
         store: Arc<dyn Store>,
         headers: HeaderMap,
@@ -365,7 +365,7 @@ impl Auth {
         let mut response = view::redirect(&self.login);
         response
             .headers_mut()
-            .insert(SET_COOKIE, cleared(&self.cookie));
+            .insert(SET_COOKIE, set_cookie(&self.cookie, "", 0));
         response
     }
 }
@@ -506,7 +506,7 @@ struct LoginForm {
 #[cfg(feature = "views")]
 #[derive(rango::serde::Deserialize)]
 #[serde(crate = "rango::serde")]
-struct NextQ {
+struct NextQuery {
     next: Option<String>,
 }
 
@@ -551,7 +551,7 @@ fn safe_next(raw: Option<String>) -> Option<String> {
     raw.filter(|to| to.starts_with('/') && !to.starts_with("//"))
 }
 
-fn redir(login: &str, req: &Request) -> String {
+fn login_url(login: &str, req: &Request) -> String {
     let back = req
         .extensions()
         .get::<OriginalUri>()
@@ -601,7 +601,7 @@ fn sign(secret: &str, id: i64, exp: i64) -> String {
     hex_encode(&mac.finalize().into_bytes())
 }
 
-fn check(secret: &str, id: i64, exp: i64, sig: &str) -> bool {
+fn verify(secret: &str, id: i64, exp: i64, sig: &str) -> bool {
     let Some(want) = hex_decode(sig) else {
         return false;
     };
@@ -612,7 +612,7 @@ fn check(secret: &str, id: i64, exp: i64, sig: &str) -> bool {
     mac.verify_slice(&want).is_ok()
 }
 
-fn parse(raw: &str) -> Option<Claim> {
+fn claim(raw: &str) -> Option<Claim> {
     let mut parts = raw.split('.');
     let id = parts.next()?.parse::<i64>().ok()?;
     let exp = parts.next()?.parse::<i64>().ok()?;
@@ -655,17 +655,9 @@ fn hex_decode(raw: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(feature = "views")]
-fn baked(name: &str, raw: &str, age: i64) -> axum::http::HeaderValue {
+fn set_cookie(name: &str, raw: &str, age: i64) -> axum::http::HeaderValue {
     axum::http::HeaderValue::from_str(&format!(
         "{name}={raw}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax"
-    ))
-    .expect("session cookie is header-safe")
-}
-
-#[cfg(feature = "views")]
-fn cleared(name: &str) -> axum::http::HeaderValue {
-    axum::http::HeaderValue::from_str(&format!(
-        "{name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
     ))
     .expect("session cookie is header-safe")
 }

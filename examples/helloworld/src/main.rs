@@ -31,8 +31,8 @@ impl View for About {
     }
 }
 
-async fn kick() -> Result<Response, Error> {
-    Ok(redirect("/about"))
+async fn admin() -> Result<Response, Error> {
+    Ok(redirect("/admin/"))
 }
 
 #[derive(Deserialize, Default)]
@@ -103,10 +103,6 @@ async fn thanks() -> Result<Response, Error> {
     render(Thanks)
 }
 
-async fn portal() -> Result<Response, Error> {
-    Ok(redirect("/admin/"))
-}
-
 fn secret() -> String {
     std::env::var("RANGO_SECRET").unwrap_or_else(|_| {
         eprintln!("warning: RANGO_SECRET is not set, using an insecure default");
@@ -140,7 +136,7 @@ fn main() {
     let store = rango::store::sqlite::open(&db).unwrap();
     hint(&store);
     let auth = rango_auth::Auth::new(&settings.secret).signup(true);
-    let admin = rango_admin::Admin::new().model::<Message>();
+    let panel = rango_admin::Admin::new().model::<Message>();
     App::new(settings)
         .store(store)
         .urls(
@@ -148,14 +144,13 @@ fn main() {
                 Routes::new()
                     .route("/", get(index))
                     .route("/about", get_view(About))
-                    .route("/kick", get(kick))
                     .route("/contact", get(contact).post(contact_post))
                     .route("/thanks", get(thanks))
-                    .route("/admin", get(portal)),
+                    .route("/admin", get(admin)),
             ),
         )
         .urls(auth.routes())
-        .mount("/admin/", auth.require_login(admin.routes()))
+        .mount("/admin/", auth.require_login(panel.routes()))
         .mount_static()
         .serve()
         .unwrap();

@@ -23,16 +23,11 @@ pub use model::{Field, Kind, Model};
 pub use repo::Repo;
 pub use settings::Settings;
 pub use urls::Routes;
-pub use view::{Request, Response, View, get_view, html, not_found, redirect, render, text};
+pub use view::{Request, Response, View, get_view, html, not_found, redirect, render};
 
 pub use askama;
-pub use axum;
 pub use serde;
 pub use tokio;
-pub use tower;
-pub use tower_http;
-pub use tracing;
-pub use tracing_subscriber;
 
 pub use askama::Template;
 pub use axum::routing::{get, post};

@@ -12,7 +12,7 @@ fn main() {
         .block_on(async move {
             match command {
                 rango_cli::Command::Migrate => {
-                    match rango_cli::migrate(&store, &helloworld::ddls()).await {
+                    match rango_cli::migrate(&store, &helloworld::schema()).await {
                         Ok(count) => println!("migrated {count} tables"),
                         Err(fail) => {
                             eprintln!("migrate failed: {fail}");

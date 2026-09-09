@@ -9,8 +9,24 @@ use crate::{
 };
 
 pub struct Repo<M = ()> {
-    pub store: Arc<dyn Store>,
+    store: Arc<dyn Store>,
     marker: PhantomData<M>,
+}
+
+fn pairs<M: Model>(model: &M) -> Vec<(&'static str, Value)> {
+    let mut values = model.row().into_iter();
+    M::fields()
+        .into_iter()
+        .filter(|field| field.kind != Kind::Id)
+        .map(|field| {
+            let value = values.next().unwrap_or(Value::Null);
+            let value = match field.default {
+                Some(ref default) if value == Value::Null => default.clone(),
+                _ => value,
+            };
+            (field.name, value)
+        })
+        .collect()
 }
 
 impl<M: Model> Repo<M> {
@@ -28,30 +44,17 @@ impl<M: Model> Repo<M> {
             .map(|_| ())
     }
 
-    pub async fn sync(&self) -> Result<(), StoreError> {
-        self.ensure().await
-    }
-
     pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
         self.ensure().await?;
-        let mut values = model.row().into_iter();
-        let mut columns = Vec::new();
-        let mut params = Vec::new();
-        for field in M::fields() {
-            if field.kind == Kind::Id {
-                continue;
-            }
-            let value = values.next().unwrap_or(Value::Null);
-            let value = match field.default {
-                Some(ref default) if value == Value::Null => default.clone(),
-                _ => value,
-            };
-            columns.push(field.name);
-            params.push(value);
-        }
-        let columns = columns.join(", ");
+        let pairs = pairs(model);
+        let columns: Vec<&str> = pairs.iter().map(|pair| pair.0).collect();
+        let params: Vec<Value> = pairs.into_iter().map(|pair| pair.1).collect();
         let holes = vec!["?"; params.len()].join(", ");
-        let sql = format!("INSERT INTO {} ({columns}) VALUES ({holes})", M::table());
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({holes})",
+            M::table(),
+            columns.join(", ")
+        );
         self.store.execute(&sql, &params).await?;
         let id = self.store.last_id(M::table()).await?;
         model.set_id(id);
@@ -77,20 +80,10 @@ impl<M: Model> Repo<M> {
 
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
         self.ensure().await?;
-        let fields = M::fields();
-        let mut values = model.row().into_iter();
         let mut sets = Vec::new();
         let mut params = Vec::new();
-        for field in &fields {
-            if field.kind == Kind::Id {
-                continue;
-            }
-            let value = values.next().unwrap_or(Value::Null);
-            let value = match field.default {
-                Some(ref default) if value == Value::Null => default.clone(),
-                _ => value,
-            };
-            sets.push(format!("{} = ?", field.name));
+        for (name, value) in pairs(model) {
+            sets.push(format!("{name} = ?"));
             params.push(value);
         }
         params.push(Value::int(model.id()));
@@ -106,16 +99,6 @@ impl<M: Model> Repo<M> {
             .execute(&sql, &[Value::int(id)])
             .await
             .map(|_| ())
-    }
-
-    pub async fn count(&self) -> Result<usize, StoreError> {
-        self.ensure().await?;
-        let sql = format!("SELECT COUNT(*) FROM {}", M::table());
-        let rows = self.store.fetch(&sql, &[]).await?;
-        match rows.first().and_then(|row| row.values.first()) {
-            Some(Value::Int(count)) => Ok(*count as usize),
-            _ => Err(StoreError::Value("bad count".into())),
-        }
     }
 }
 

@@ -10,10 +10,6 @@ use crate::error::Error;
 pub type Request = axum::extract::Request;
 pub type Response = axum::response::Response;
 
-pub fn text(body: impl Into<String>) -> Response {
-    body.into().into_response()
-}
-
 pub fn html(body: impl Into<String>) -> Response {
     Html(body.into()).into_response()
 }

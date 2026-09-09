@@ -7,12 +7,12 @@ use std::{
 use askama::Template;
 use axum::{
     extract::{Extension, Form, OriginalUri, Path, Query},
-    http::{HeaderMap, Uri, header::COOKIE},
+    http::{HeaderMap, Uri},
     routing::{get, post},
 };
 use rango::{
     Error, Repo, Response, Row, Store, Value,
-    csrf::Token,
+    csrf::{Token, cookie},
     model::{Field, Kind, Model},
     urls::Routes,
     view::{self, render},
@@ -35,7 +35,7 @@ pub trait AdminModel: Model {
     fn search() -> Vec<&'static str> {
         Self::fields()
             .iter()
-            .filter(|field| matches!(flat(&field.kind), Kind::Str))
+            .filter(|field| matches!(field.kind.flat(), Kind::Str))
             .map(|field| field.name)
             .collect()
     }
@@ -169,21 +169,8 @@ struct Pair {
 fn token(headers: &HeaderMap, guard: Option<Extension<Token>>) -> String {
     match guard {
         Some(Extension(token)) => token.0.clone(),
-        None => cookie(headers),
+        None => cookie(headers).unwrap_or_default(),
     }
-}
-
-fn cookie(headers: &HeaderMap) -> String {
-    headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').map(str::trim).find_map(|part| {
-                let (name, value) = part.split_once('=')?;
-                (name == "csrf").then(|| value.to_string())
-            })
-        })
-        .unwrap_or_default()
 }
 
 fn back(uri: &Uri, drop: usize) -> String {
@@ -195,13 +182,6 @@ fn back(uri: &Uri, drop: usize) -> String {
 }
 
 const PAGE: usize = 25;
-
-fn flat(kind: &Kind) -> &Kind {
-    match kind {
-        Kind::Optional(inner) => inner.as_ref(),
-        kind => kind,
-    }
-}
 
 fn cell(values: &[Value], i: usize) -> String {
     text(values.get(i))
@@ -229,7 +209,7 @@ fn id_of(values: &[Value], fields: &[Field]) -> String {
         .unwrap_or_default()
 }
 
-fn wanted(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
+fn locate(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
     let mut out = Vec::new();
     for name in names {
         if let Some(i) = fields
@@ -251,20 +231,10 @@ fn escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn display(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::Str(text)) => text.clone(),
-        Some(Value::Int(number)) => number.to_string(),
-        Some(Value::Float(number)) => number.to_string(),
-        Some(Value::Bool(true)) => "on".into(),
-        Some(Value::Bool(false)) | Some(Value::Null) | None => String::new(),
-    }
-}
-
 fn input(field: &Field, value: Option<&Value>) -> String {
     control(
         field,
-        &display(value),
+        &text(value),
         matches!(value, Some(Value::Bool(true))),
     )
 }
@@ -273,7 +243,7 @@ fn input_raw(field: &Field, raw: &str) -> String {
     control(
         field,
         raw,
-        matches!(flat(&field.kind), Kind::Bool) && raw == "on",
+        matches!(field.kind.flat(), Kind::Bool) && raw == "on",
     )
 }
 
@@ -288,7 +258,7 @@ fn locked(field: &Field, value: Option<&Value>) -> String {
 fn control(field: &Field, value: &str, checked: bool) -> String {
     let name = field.name;
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
-    match flat(&field.kind) {
+    match field.kind.flat() {
         Kind::Id | Kind::Optional(_) => String::new(),
         Kind::Str => {
             format!(
@@ -315,8 +285,8 @@ fn bad(field: &Field, want: &str) -> Error {
     Error::BadRequest(format!("{} must be {want}", field.name))
 }
 
-fn parse(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
-    let kind = flat(&field.kind);
+fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
+    let kind = field.kind.flat();
     let raw = raw.map(String::as_str).unwrap_or("");
     if raw.is_empty() && matches!(kind, Kind::Bool) {
         return Ok(Value::bool(false));
@@ -343,7 +313,7 @@ fn parse(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
     }
 }
 
-fn has(
+fn keep(
     fields: &[Field],
     values: &[Value],
     query: &str,
@@ -363,14 +333,14 @@ fn has(
             return true;
         }
         match params.get(field.name) {
-            Some(raw) if !raw.is_empty() => filter_hit(field, values.get(i), raw),
+            Some(raw) if !raw.is_empty() => hit(field, values.get(i), raw),
             _ => true,
         }
     })
 }
 
-fn filter_hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
-    match flat(&field.kind) {
+fn hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
+    match field.kind.flat() {
         Kind::Id | Kind::Optional(_) => true,
         Kind::Str => text(value).to_lowercase().contains(&raw.to_lowercase()),
         Kind::Int | Kind::DateTime => match (value, raw.parse::<i64>()) {
@@ -382,14 +352,10 @@ fn filter_hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
             _ => false,
         },
         Kind::Bool => match value {
-            Some(Value::Bool(have)) => *have == truthy(raw),
+            Some(Value::Bool(have)) => *have == matches!(raw, "1" | "true" | "on" | "yes"),
             _ => false,
         },
     }
-}
-
-fn truthy(raw: &str) -> bool {
-    matches!(raw, "1" | "true" | "on" | "yes")
 }
 
 fn compare(one: Option<&Value>, other: Option<&Value>) -> Ordering {
@@ -422,7 +388,7 @@ fn sort_rows(fields: &[Field], rows: &mut [Vec<Value>], sort: &str) {
     });
 }
 
-fn qs(params: &HashMap<String, String>, skip: &[&str]) -> String {
+fn encode(params: &HashMap<String, String>, skip: &[&str]) -> String {
     let mut pairs: Vec<(&String, &String)> = params
         .iter()
         .filter(|(key, _)| !skip.contains(&key.as_str()))
@@ -431,7 +397,7 @@ fn qs(params: &HashMap<String, String>, skip: &[&str]) -> String {
     serde_urlencoded::to_string(pairs).unwrap_or_default()
 }
 
-fn with(base: &str, extra: &str) -> String {
+fn href(base: &str, extra: &str) -> String {
     if base.is_empty() {
         format!("?{extra}")
     } else {
@@ -443,7 +409,7 @@ fn filter_input(field: &Field, value: &str) -> String {
     let name = field.name;
     let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
     let value = escape(value);
-    match flat(&field.kind) {
+    match field.kind.flat() {
         Kind::Id | Kind::Optional(_) => String::new(),
         Kind::Str => {
             format!(
@@ -466,13 +432,6 @@ fn filter_input(field: &Field, value: &str) -> String {
     }
 }
 
-fn entries(base: &str, models: &[Registered]) -> Vec<(String, String)> {
-    models
-        .iter()
-        .map(|model| (format!("{base}/{}/", model.table), model.table.to_string()))
-        .collect()
-}
-
 async fn dashboard(
     models: Arc<Mutex<Vec<Registered>>>,
     store: Extension<Arc<dyn Store>>,
@@ -484,16 +443,21 @@ async fn dashboard(
         .map_err(|_| Error::Server("admin registry".into()))?;
     let base = uri.path().trim_end_matches('/');
     let mut items = Vec::new();
-    for (href, title) in entries(base, &registered) {
+    for model in &registered {
+        let href = format!("{base}/{}/", model.table);
         let rows = store
-            .fetch(&format!("SELECT COUNT(*) FROM {title}"), &[])
+            .fetch(&format!("SELECT COUNT(*) FROM {}", model.table), &[])
             .await
             .unwrap_or_default();
         let count = match rows.first().and_then(|row| row.get(0)) {
             Some(Value::Int(number)) => number.to_string(),
             _ => "0".into(),
         };
-        items.push(Entry { href, title, count });
+        items.push(Entry {
+            href,
+            title: model.table.to_string(),
+            count,
+        });
     }
     render(Dashboard { entries: items })
 }
@@ -503,14 +467,14 @@ async fn list<M: AdminModel>(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
-    let at = wanted(&M::columns(), &fields);
-    let find = wanted(&M::search(), &fields);
+    let at = locate(&M::columns(), &fields);
+    let find = locate(&M::search(), &fields);
     let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
     let sort = params.get("sort").cloned().unwrap_or_default();
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for model in repo.all().await? {
-        let values = full(&model, &fields);
-        if has(&fields, &values, &query, &params, &find) {
+        let values = with_id(&model, &fields);
+        if keep(&fields, &values, &query, &params, &find) {
             rows.push(values);
         }
     }
@@ -525,8 +489,8 @@ async fn list<M: AdminModel>(
     let start = (page - 1) * PAGE;
     let end = (start + PAGE).min(total);
 
-    let bare = qs(&params, &["page", "sort"]);
-    let kept = qs(&params, &["page"]);
+    let bare = encode(&params, &["page", "sort"]);
+    let kept = encode(&params, &["page"]);
     let columns = at
         .iter()
         .map(|&i| {
@@ -541,7 +505,7 @@ async fn list<M: AdminModel>(
             Column {
                 name: name.to_string(),
                 marker,
-                href: with(&bare, &format!("sort={toggle}")),
+                href: href(&bare, &format!("sort={toggle}")),
             }
         })
         .collect();
@@ -562,8 +526,8 @@ async fn list<M: AdminModel>(
             )
         })
         .collect();
-    let prev = (page > 1).then(|| with(&kept, &format!("page={}", page - 1)));
-    let next = (page < pages).then(|| with(&kept, &format!("page={}", page + 1)));
+    let prev = (page > 1).then(|| href(&kept, &format!("page={}", page - 1)));
+    let next = (page < pages).then(|| href(&kept, &format!("page={}", page + 1)));
     render(List {
         title: M::table(),
         q: params.get("q").cloned().unwrap_or_default(),
@@ -579,7 +543,7 @@ async fn list<M: AdminModel>(
     })
 }
 
-fn full<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
+fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
     let mut out = vec![Value::int(model.id())];
     let mut values = model.row().into_iter();
     for field in fields {
@@ -599,7 +563,7 @@ async fn detail<M: AdminModel>(
 ) -> Result<Response, Error> {
     let model = repo.get(id).await?.ok_or(Error::NotFound)?;
     let fields = M::fields();
-    let values = full(&model, &fields);
+    let values = with_id(&model, &fields);
     let pairs = fields
         .iter()
         .enumerate()
@@ -668,7 +632,7 @@ async fn create<M: AdminModel>(
         }
         let raw = map.get(field.name).map(String::as_str).unwrap_or("");
         inputs.push(input_raw(field, raw));
-        match parse(field, map.get(field.name)) {
+        match value(field, map.get(field.name)) {
             Ok(value) => values.push(value),
             Err(fail) => {
                 problems.push(fail.to_string());
@@ -755,7 +719,7 @@ async fn replace<M: AdminModel>(
         }
         let raw = map.get(field.name).map(String::as_str).unwrap_or("");
         inputs.push(input_raw(field, raw));
-        match parse(field, map.get(field.name)) {
+        match value(field, map.get(field.name)) {
             Ok(value) => values.push(value),
             Err(fail) => {
                 problems.push(fail.to_string());

@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::{BoxFuture, Row, Rows, Store, StoreError, Value};
 
@@ -23,8 +23,19 @@ fn guard(table: Option<&Table>) -> Result<&Table, StoreError> {
     table.ok_or_else(|| StoreError::Sql("no table".into()))
 }
 
-fn id_of(params: &[Value]) -> Result<i64, StoreError> {
-    match params.first() {
+fn name(text: &str) -> String {
+    text.trim().trim_matches('"').to_string()
+}
+
+fn head(rest: &str, what: &str) -> Result<String, StoreError> {
+    let open = rest
+        .find('(')
+        .ok_or_else(|| StoreError::Sql(format!("bad {what}")))?;
+    Ok(name(&rest[..open]))
+}
+
+fn id_of(value: Option<&Value>) -> Result<i64, StoreError> {
+    match value {
         Some(Value::Int(value)) => Ok(*value),
         _ => Err(StoreError::Value("expected id param".into())),
     }
@@ -41,38 +52,31 @@ fn create(sql: &str) -> Result<String, StoreError> {
     let rest = sql
         .strip_prefix("CREATE TABLE IF NOT EXISTS ")
         .ok_or_else(|| StoreError::Sql("expected create".into()))?;
-    let open = rest
-        .find('(')
-        .ok_or_else(|| StoreError::Sql("bad create".into()))?;
-    Ok(rest[..open].trim().trim_matches('"').to_string())
+    head(rest, "create")
 }
 
 fn insert(sql: &str) -> Result<String, StoreError> {
     let rest = sql
         .strip_prefix("INSERT INTO ")
         .ok_or_else(|| StoreError::Sql("expected insert".into()))?;
-    let open = rest
-        .find('(')
-        .ok_or_else(|| StoreError::Sql("bad insert".into()))?;
-    let name = rest[..open].trim().trim_matches('"').to_string();
-    Ok(name)
+    head(rest, "insert")
 }
 
 fn select(sql: &str) -> Result<(String, Query), StoreError> {
     if let Some(rest) = sql.strip_prefix("SELECT COUNT(*) FROM ") {
-        return Ok((rest.trim().trim_matches('"').to_string(), Query::Count));
+        return Ok((name(rest), Query::Count));
     }
     let rest = sql
         .strip_prefix("SELECT * FROM ")
         .ok_or_else(|| StoreError::Sql(format!("unsupported {sql}")))?;
     if let Some((head, _)) = rest.split_once(" WHERE id = ?") {
-        Ok((head.trim().trim_matches('"').to_string(), Query::Where))
+        Ok((name(head), Query::Where))
     } else {
         let head = rest
             .split_once(" ORDER BY id")
             .map(|(head, _)| head)
             .unwrap_or(rest);
-        Ok((head.trim().trim_matches('"').to_string(), Query::All))
+        Ok((name(head), Query::All))
     }
 }
 
@@ -80,16 +84,13 @@ fn update(sql: &str) -> Result<(String, usize), StoreError> {
     let rest = sql
         .strip_prefix("UPDATE ")
         .ok_or_else(|| StoreError::Sql("expected update".into()))?;
-    let (name, set) = rest
+    let (table, set) = rest
         .split_once(" SET ")
         .ok_or_else(|| StoreError::Sql("bad update".into()))?;
     let set = set
         .strip_suffix(" WHERE id = ?")
         .ok_or_else(|| StoreError::Sql("bad update".into()))?;
-    Ok((
-        name.trim().trim_matches('"').to_string(),
-        set.split(", ").count(),
-    ))
+    Ok((name(table), set.split(", ").count()))
 }
 
 fn delete(sql: &str) -> Result<String, StoreError> {
@@ -100,10 +101,10 @@ fn delete(sql: &str) -> Result<String, StoreError> {
         .split_once(" WHERE id = ?")
         .map(|(head, _)| head)
         .unwrap_or(rest);
-    Ok(head.trim().trim_matches('"').to_string())
+    Ok(name(head))
 }
 
-fn locked(tables: &Mutex<Vec<Table>>) -> Result<std::sync::MutexGuard<'_, Vec<Table>>, StoreError> {
+fn locked(tables: &Mutex<Vec<Table>>) -> Result<MutexGuard<'_, Vec<Table>>, StoreError> {
     tables
         .lock()
         .map_err(|_| StoreError::Poison("memory tables".into()))
@@ -145,20 +146,18 @@ impl Store for Memory {
             }
             if sql.starts_with("UPDATE ") {
                 let (name, count) = update(&sql)?;
-                let Some(Value::Int(id)) = params.last() else {
-                    return Err(StoreError::Value("expected id param".into()));
-                };
+                let id = id_of(params.last())?;
                 let table = tables
                     .iter_mut()
                     .find(|table| table.name == name)
                     .ok_or_else(|| StoreError::Sql(format!("no table {name}")))?;
                 let mut touched = 0;
                 for row in &mut table.rows {
-                    if row_id(row) != *id {
+                    if row_id(row) != id {
                         continue;
                     }
                     let mut values = Vec::with_capacity(count + 1);
-                    values.push(Value::Int(*id));
+                    values.push(Value::Int(id));
                     values.extend(params.iter().take(count).cloned());
                     row.values = values;
                     touched += 1;
@@ -167,7 +166,7 @@ impl Store for Memory {
             }
             if sql.starts_with("DELETE FROM ") {
                 let name = delete(&sql)?;
-                let id = id_of(&params)?;
+                let id = id_of(params.first())?;
                 let table = tables
                     .iter_mut()
                     .find(|table| table.name == name)
@@ -197,7 +196,7 @@ impl Store for Memory {
                 }]),
                 Query::All => Ok(table.rows.clone()),
                 Query::Where => {
-                    let id = id_of(&params)?;
+                    let id = id_of(params.first())?;
                     Ok(table
                         .rows
                         .iter()

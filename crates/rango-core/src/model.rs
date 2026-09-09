@@ -20,9 +20,9 @@ impl Kind {
         matches!(self, &Kind::Optional(_))
     }
 
-    fn without(self) -> Kind {
+    pub fn flat(&self) -> &Kind {
         match self {
-            Kind::Optional(inner) => *inner,
+            Kind::Optional(inner) => inner.flat(),
             kind => kind,
         }
     }
@@ -77,7 +77,7 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn literal(value: &Value) -> String {
+fn literal(value: &Value) -> String {
     match value {
         Value::Null => "NULL".into(),
         Value::Int(value) => value.to_string(),
@@ -93,21 +93,24 @@ pub fn literal(value: &Value) -> String {
     }
 }
 
+fn sql(kind: &Kind) -> &'static str {
+    match kind {
+        Kind::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        Kind::Str => "TEXT",
+        Kind::Int | Kind::DateTime => "INTEGER",
+        Kind::Float => "REAL",
+        Kind::Bool => "INTEGER",
+        Kind::Optional(inner) => sql(inner),
+    }
+}
+
 fn column(field: &Field) -> String {
-    let optional = field.kind.is_optional();
-    let mut base: String = match field.kind.clone().without() {
-        Kind::Id => "INTEGER PRIMARY KEY AUTOINCREMENT".into(),
-        Kind::Str => "TEXT".into(),
-        Kind::Int | Kind::DateTime => "INTEGER".into(),
-        Kind::Float => "REAL".into(),
-        Kind::Bool => "INTEGER".into(),
-        Kind::Optional(_) => unreachable!(),
-    };
+    let mut base = sql(&field.kind).to_string();
     if field.kind != Kind::Id {
         if field.unique {
             base.push_str(" UNIQUE");
         }
-        if !optional {
+        if !field.kind.is_optional() {
             base.push_str(" NOT NULL");
         }
         if let Some(default) = &field.default {

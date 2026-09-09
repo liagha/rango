@@ -52,7 +52,7 @@ impl Model for Message {
 
 impl AdminModel for Message {}
 
-pub fn ddls() -> Vec<String> {
+pub fn schema() -> Vec<String> {
     vec![
         model::create_table::<Message>(),
         model::create_table::<rango_auth::User>(),

@@ -1,8 +1,8 @@
 pub use axum::extract::Form;
 
 pub struct FieldError {
-    pub field: String,
-    pub message: String,
+    field: String,
+    message: String,
 }
 
 impl FieldError {
@@ -14,7 +14,7 @@ impl FieldError {
     }
 }
 
-pub struct Errors(pub Vec<FieldError>);
+pub struct Errors(Vec<FieldError>);
 
 impl Errors {
     pub fn new() -> Self {
@@ -25,12 +25,10 @@ impl Errors {
         self.0.push(FieldError::new(field, message));
     }
 
-    pub fn get(&self, field: &str) -> Option<&FieldError> {
-        self.0.iter().find(|error| error.field == field)
-    }
-
     pub fn message(&self, field: &str) -> &str {
-        self.get(field)
+        self.0
+            .iter()
+            .find(|error| error.field == field)
             .map(|error| error.message.as_str())
             .unwrap_or("")
     }
@@ -40,43 +38,12 @@ impl Errors {
     }
 }
 
-impl From<Vec<FieldError>> for Errors {
-    fn from(fields: Vec<FieldError>) -> Self {
-        Self(fields)
-    }
-}
-
 impl Default for Errors {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl IntoIterator for Errors {
-    type Item = FieldError;
-    type IntoIter = std::vec::IntoIter<FieldError>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
 pub trait Valid {
     fn errors(&self) -> Errors;
-
-    fn valid(&self) -> bool {
-        self.errors().valid()
-    }
-
-    fn clean(self) -> Result<Self, Errors>
-    where
-        Self: Sized,
-    {
-        let errors = self.errors();
-        if errors.valid() {
-            Ok(self)
-        } else {
-            Err(errors)
-        }
-    }
 }
