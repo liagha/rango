@@ -4,7 +4,7 @@ use rango::model::Schema;
 use rango_store::{Store, StoreError};
 
 pub enum Command {
-    Migrate,
+    Migrate { drop: bool },
     Create(Create),
 }
 
@@ -19,13 +19,22 @@ pub enum Create {
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     match args.next().as_deref() {
-        Some("migrate") => Ok(Command::Migrate),
+        Some("migrate") => {
+            let mut drop = false;
+            for arg in args.by_ref() {
+                match arg.as_str() {
+                    "--drop" => drop = true,
+                    other => return Err(format!("unknown argument {other}")),
+                }
+            }
+            Ok(Command::Migrate { drop })
+        }
         Some("create") => match args.next().as_deref() {
             Some("user") => {
                 let mut username = None;
                 let mut password = None;
                 let mut superuser = false;
-                while let Some(arg) = args.next() {
+                for arg in args.by_ref() {
                     match arg.as_str() {
                         "--username" => username = args.next(),
                         "--password" => password = args.next(),
@@ -48,10 +57,14 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
 }
 
 pub fn usage() -> &'static str {
-    "usage: rango <command>\ncommands:\n  migrate\n  create user [--username NAME] [--password PASS] [--super]"
+    "usage: rango <command>\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]"
 }
 
-pub async fn migrate(store: &Arc<dyn Store>, schemas: &[Schema]) -> Result<usize, StoreError> {
+pub async fn migrate(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    drop: bool,
+) -> Result<usize, StoreError> {
     let mut done = 0;
     for schema in schemas {
         store.execute(&schema.ddl(), &[]).await?;
@@ -61,6 +74,12 @@ pub async fn migrate(store: &Arc<dyn Store>, schemas: &[Schema]) -> Result<usize
                 for sql in schema.alter(&have) {
                     store.execute(&sql, &[]).await?;
                     done += 1;
+                }
+                if drop {
+                    for sql in schema.drop(&have) {
+                        store.execute(&sql, &[]).await?;
+                        done += 1;
+                    }
                 }
             }
             Err(StoreError::Unsupported(_)) => {}

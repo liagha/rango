@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "views")]
 use axum::extract::Query;
@@ -28,7 +28,7 @@ use rango::{forgery::Token, view::render};
 mod session;
 mod user;
 
-use session::{Claim, claim, cookie, login_url, verify};
+use session::{Attempts, Claim, claim, cookie, login_url, verify};
 #[cfg(feature = "views")]
 use session::{safe_next, set_cookie, sign, token};
 pub use user::User;
@@ -43,6 +43,7 @@ pub struct Auth {
     cookie: String,
     days: i64,
     signup: bool,
+    attempts: Arc<Mutex<Attempts>>,
 }
 
 impl Auth {
@@ -53,6 +54,7 @@ impl Auth {
             cookie: "session".into(),
             days: 14,
             signup: false,
+            attempts: Arc::new(Mutex::new(Attempts::new(5, 15))),
         }
     }
 
@@ -73,6 +75,20 @@ impl Auth {
 
     pub fn signup(mut self, on: bool) -> Self {
         self.signup = on;
+        self
+    }
+
+    pub fn attempts(self, max: u32) -> Self {
+        if let Ok(mut attempts) = self.attempts.lock() {
+            attempts.max = max;
+        }
+        self
+    }
+
+    pub fn lockout(self, minutes: i64) -> Self {
+        if let Ok(mut attempts) = self.attempts.lock() {
+            attempts.minutes = minutes;
+        }
         self
     }
 
@@ -110,9 +126,12 @@ impl Auth {
                     },
                 )
                 .post(
-                    move |store: Extension<Arc<dyn Store>>, Form(form): Form<LoginForm>| {
+                    move |store: Extension<Arc<dyn Store>>,
+                          headers: HeaderMap,
+                          guard: Option<Extension<Token>>,
+                          Form(form): Form<LoginForm>| {
                         let enter = enter.clone();
-                        async move { enter.enter(store.0, form).await }
+                        async move { enter.enter(store.0, headers, guard, form).await }
                     },
                 ),
             )
@@ -253,23 +272,48 @@ impl Auth {
     }
 
     #[cfg(feature = "views")]
-    async fn enter(&self, store: Arc<dyn Store>, form: LoginForm) -> Result<Response, Error> {
+    async fn enter(
+        &self,
+        store: Arc<dyn Store>,
+        headers: HeaderMap,
+        guard: Option<Extension<Token>>,
+        form: LoginForm,
+    ) -> Result<Response, Error> {
         let next = safe_next(form.next.clone()).unwrap_or_else(|| "/".into());
+        let denied = |error: &str| {
+            render(Login {
+                error: error.into(),
+                username: form.username.clone(),
+                user: None,
+                token: token(&headers, guard.clone()),
+                next: safe_next(form.next.clone()).unwrap_or_default(),
+            })
+        };
+        let locked = self
+            .attempts
+            .lock()
+            .map(|mut attempts| attempts.blocked(&form.username))
+            .unwrap_or(true);
+        if locked {
+            return denied("Too many attempts. Try again later.");
+        }
         match User::login(store, &form.username, &form.password).await? {
             Some(user) => {
+                if let Ok(mut attempts) = self.attempts.lock() {
+                    attempts.clear(&user.username);
+                }
                 let mut response = view::redirect(&next);
                 response
                     .headers_mut()
                     .insert(SET_COOKIE, self.cookie_for(&user));
                 Ok(response)
             }
-            None => render(Login {
-                error: "Invalid username or password.".into(),
-                username: form.username,
-                user: None,
-                token: String::new(),
-                next: safe_next(form.next).unwrap_or_default(),
-            }),
+            None => {
+                if let Ok(mut attempts) = self.attempts.lock() {
+                    attempts.fail(&form.username);
+                }
+                denied("Invalid username or password.")
+            }
         }
     }
 

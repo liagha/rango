@@ -10,13 +10,15 @@ use axum::{
     routing::{get, post},
 };
 use rango::{
-    Error, Repository, Response, Row, Store, Value,
+    Error, Repository, Response, Row, Store, StoreError, Value,
+    chrono::{DateTime, Utc},
     forgery::{Token, cookie},
-    model::{Model, Type},
+    model::{Field, Model, Type},
     store::ColumnKind,
     urls::Routes,
     view::{self, render},
 };
+use rango_auth::Current;
 
 mod form;
 mod query;
@@ -24,11 +26,115 @@ mod row;
 
 use form::{filter_input, input, input_raw, locked, value};
 use query::{PAGE, encode, href, keep, sort_rows};
-use row::{cell, id_of, locate, with_id};
+use row::{cell, id_of, locate, when, with_id};
 
 #[derive(Clone)]
 struct Registered {
     table: &'static str,
+}
+
+#[derive(Clone)]
+struct History {
+    id: i64,
+    model: String,
+    row: i64,
+    action: Action,
+    user: String,
+    at: DateTime<Utc>,
+}
+
+impl Model for History {
+    fn table() -> &'static str {
+        "history"
+    }
+
+    fn fields() -> Vec<Field> {
+        vec![
+            Field::id(),
+            Field::new("model", Type::Str),
+            Field::new("row", Type::Int),
+            Field::new("action", Type::Str),
+            Field::new("user", Type::Str),
+            Field::new("at", Type::DateTime),
+        ]
+    }
+
+    fn row(&self) -> Vec<Value> {
+        vec![
+            Value::str(&self.model),
+            Value::int(self.row),
+            Value::str(self.action.name()),
+            Value::str(&self.user),
+            Value::datetime(self.at),
+        ]
+    }
+
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(Self {
+            id: row.int(0)?,
+            model: row.str(1)?,
+            row: row.int(2)?,
+            action: Action::parse(&row.str(3)?)?,
+            user: row.str(4)?,
+            at: row.datetime(5)?,
+        })
+    }
+
+    fn set_id(&mut self, id: i64) {
+        self.id = id;
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Create,
+    Edit,
+    Delete,
+}
+
+impl Action {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Edit => "edit",
+            Self::Delete => "delete",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        match raw {
+            "create" => Ok(Self::Create),
+            "edit" => Ok(Self::Edit),
+            "delete" => Ok(Self::Delete),
+            _ => Err(StoreError::Value(format!("bad action {raw}"))),
+        }
+    }
+}
+
+async fn log(
+    history: &Repository<History>,
+    table: &'static str,
+    row: i64,
+    action: Action,
+    current: &Current,
+) {
+    let mut entry = History {
+        id: 0,
+        model: table.to_string(),
+        row,
+        action,
+        user: current
+            .0
+            .as_ref()
+            .map(|user| user.username.clone())
+            .unwrap_or_default(),
+        at: Utc::now(),
+    };
+    let _ = history.save(&mut entry).await;
 }
 
 pub trait AdminModel: Model {
@@ -166,12 +272,19 @@ struct Detail {
     title: &'static str,
     id: String,
     pairs: Vec<Pair>,
+    past: Vec<Log>,
     token: String,
 }
 
 struct Pair {
     name: String,
     value: String,
+}
+
+struct Log {
+    at: String,
+    user: String,
+    action: String,
 }
 
 fn token(headers: &HeaderMap, guard: Option<Extension<Token>>) -> String {
@@ -204,7 +317,7 @@ async fn dashboard(
         let href = format!("{base}/{}/", model.table);
         let rows = store
             .fetch(
-                &format!("SELECT COUNT(*) FROM {}", model.table),
+                &format!("SELECT COUNT(*) FROM \"{}\"", model.table),
                 &[],
                 &[ColumnKind::Integer],
             )
@@ -306,6 +419,7 @@ async fn list<M: AdminModel>(
 
 async fn detail<M: AdminModel>(
     repository: Repository<M>,
+    history: Repository<History>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
@@ -321,10 +435,28 @@ async fn detail<M: AdminModel>(
             value: cell(&values, i),
         })
         .collect();
+    let mut events = Vec::new();
+    if let Ok(all) = history.all().await {
+        for event in all {
+            if event.model == M::table() && event.row == id {
+                events.push(event);
+            }
+        }
+    }
+    events.sort_by_key(|event| std::cmp::Reverse(event.at));
+    let past: Vec<Log> = events
+        .into_iter()
+        .map(|event| Log {
+            at: when(&event.at),
+            user: event.user,
+            action: event.action.name().to_string(),
+        })
+        .collect();
     render(Detail {
         title: M::table(),
         id: id.to_string(),
         pairs,
+        past,
         token: token(&headers, guard),
     })
 }
@@ -359,6 +491,8 @@ async fn show_new<M: AdminModel>(
 
 async fn create<M: AdminModel>(
     repository: Repository<M>,
+    history: Repository<History>,
+    current: Current,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
@@ -403,6 +537,7 @@ async fn create<M: AdminModel>(
     }
     let mut model = M::from_row(&Row { values })?;
     repository.save(&mut model).await?;
+    log(&history, M::table(), model.id(), Action::Create, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -440,18 +575,21 @@ async fn show_edit<M: AdminModel>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn replace<M: AdminModel>(
     repository: Repository<M>,
+    history: Repository<History>,
+    current: Current,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<i64>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
-    let current = repository.get(id).await?.ok_or(Error::NotFound)?;
+    let old = repository.get(id).await?.ok_or(Error::NotFound)?;
     let fields = M::fields();
     let fixed = M::readonly();
-    let have = current.row();
+    let have = old.row();
     let mut slots = have.iter();
     let mut values = vec![Value::int(id)];
     let mut inputs = Vec::new();
@@ -490,14 +628,18 @@ async fn replace<M: AdminModel>(
     }
     let model = M::from_row(&Row { values })?;
     repository.update(&model).await?;
+    log(&history, M::table(), id, Action::Edit, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
 async fn remove<M: AdminModel>(
     repository: Repository<M>,
+    history: Repository<History>,
+    current: Current,
     OriginalUri(uri): OriginalUri,
     Path(id): Path<i64>,
 ) -> Result<Response, Error> {
     repository.delete(id).await?;
+    log(&history, M::table(), id, Action::Delete, &current).await;
     Ok(view::redirect(&back(&uri, 2)))
 }

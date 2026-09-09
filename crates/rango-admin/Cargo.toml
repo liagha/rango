@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rango-core = { workspace = true, features = ["forgery"] }
+rango-auth.workspace = true
 askama.workspace = true
 axum.workspace = true
 serde_urlencoded.workspace = true

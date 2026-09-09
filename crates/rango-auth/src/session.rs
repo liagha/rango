@@ -1,5 +1,11 @@
 #[cfg(feature = "views")]
 use axum::extract::Extension;
+#[cfg(feature = "views")]
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
 use axum::{
     extract::OriginalUri,
     http::{HeaderMap, header::COOKIE},
@@ -11,6 +17,62 @@ use rango::view::Request;
 use sha2::Sha256;
 
 pub(crate) type Claim = (i64, i64, String);
+
+pub(crate) struct Attempts {
+    pub(crate) max: u32,
+    pub(crate) minutes: i64,
+    #[cfg(feature = "views")]
+    hits: HashMap<String, (u32, Instant)>,
+}
+
+impl Attempts {
+    pub(crate) fn new(max: u32, minutes: i64) -> Self {
+        Self {
+            max,
+            minutes,
+            #[cfg(feature = "views")]
+            hits: HashMap::new(),
+        }
+    }
+
+    #[cfg(feature = "views")]
+    pub(crate) fn blocked(&mut self, name: &str) -> bool {
+        self.sweep();
+        self.hits
+            .get(name)
+            .is_some_and(|(fails, _)| *fails >= self.max)
+    }
+
+    #[cfg(feature = "views")]
+    pub(crate) fn fail(&mut self, name: &str) {
+        let window = self.window();
+        let now = Instant::now();
+        let hit = self.hits.entry(name.into()).or_insert((0, now));
+        if now.duration_since(hit.1) >= window {
+            *hit = (1, now);
+        } else {
+            hit.0 += 1;
+        }
+    }
+
+    #[cfg(feature = "views")]
+    pub(crate) fn clear(&mut self, name: &str) {
+        self.hits.remove(name);
+    }
+
+    #[cfg(feature = "views")]
+    fn window(&self) -> Duration {
+        Duration::from_secs(self.minutes.max(1) as u64 * 60)
+    }
+
+    #[cfg(feature = "views")]
+    fn sweep(&mut self) {
+        let window = self.window();
+        let now = Instant::now();
+        self.hits
+            .retain(|_, (_, since)| now.duration_since(*since) < window);
+    }
+}
 
 pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers

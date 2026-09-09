@@ -15,4 +15,17 @@
 <input type="hidden" name="forgery" value="{{ token }}">
 <p class="actions"><button class="ghost" type="submit">Delete</button></p>
 </form>
+<h2>History</h2>
+{% if past.is_empty() %}
+<p class="muted">No changes yet.</p>
+{% else %}
+<table>
+<tbody>
+<tr><th>When</th><th>Who</th><th>What</th></tr>
+{% for log in past %}
+<tr><td>{{ log.at }}</td><td>{{ log.user }}</td><td>{{ log.action }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
 {% endblock %}

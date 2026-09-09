@@ -97,7 +97,7 @@ impl Schema {
     pub fn ddl(&self) -> String {
         let columns: Vec<String> = self.fields.iter().map(column).collect();
         format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
             self.table,
             columns.join(", ")
         )
@@ -111,10 +111,23 @@ impl Schema {
             }
             if !have.iter().any(|name| name == field.name) {
                 out.push(format!(
-                    "ALTER TABLE {} ADD COLUMN {}",
+                    "ALTER TABLE \"{}\" ADD COLUMN {}",
                     self.table,
                     column(field)
                 ));
+            }
+        }
+        out
+    }
+
+    pub fn drop(&self, have: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in have {
+            if name == "id" {
+                continue;
+            }
+            if !self.fields.iter().any(|field| field.name == name) {
+                out.push(format!("ALTER TABLE \"{}\" DROP COLUMN \"{name}\"", self.table));
             }
         }
         out
@@ -178,7 +191,7 @@ fn column(field: &Field) -> String {
             base.push_str(&format!(" DEFAULT {}", literal(default)));
         }
     }
-    format!("{} {}", field.name, base)
+    format!("\"{}\" {}", field.name, base)
 }
 
 pub struct Repository<M = ()> {
@@ -221,7 +234,7 @@ impl<M: Model> Repository<M> {
         let params: Vec<Value> = pairs.into_iter().map(|pair| pair.1).collect();
         let holes = vec!["?"; params.len()].join(", ");
         let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({holes})",
+            "INSERT INTO \"{}\" ({}) VALUES ({holes})",
             M::table(),
             columns.join(", ")
         );
@@ -233,7 +246,7 @@ impl<M: Model> Repository<M> {
 
     pub async fn get(&self, id: i64) -> Result<Option<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM {} WHERE id = ?", M::table());
+        let sql = format!("SELECT * FROM \"{}\" WHERE id = ?", M::table());
         let rows = self
             .store
             .fetch(&sql, &[Value::int(id)], &kinds::<M>())
@@ -246,7 +259,7 @@ impl<M: Model> Repository<M> {
 
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
-        let sql = format!("SELECT * FROM {} ORDER BY id", M::table());
+        let sql = format!("SELECT * FROM \"{}\" ORDER BY id", M::table());
         let rows = self.store.fetch(&sql, &[], &kinds::<M>()).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
     }
@@ -260,14 +273,14 @@ impl<M: Model> Repository<M> {
             params.push(value);
         }
         params.push(Value::int(model.id()));
-        let sql = format!("UPDATE {} SET {} WHERE id = ?", M::table(), sets.join(", "));
+        let sql = format!("UPDATE \"{}\" SET {} WHERE id = ?", M::table(), sets.join(", "));
         self.store.execute(&sql, &params).await?;
         Ok(())
     }
 
     pub async fn delete(&self, id: i64) -> Result<(), StoreError> {
         self.ensure().await?;
-        let sql = format!("DELETE FROM {} WHERE id = ?", M::table());
+        let sql = format!("DELETE FROM \"{}\" WHERE id = ?", M::table());
         self.store
             .execute(&sql, &[Value::int(id)])
             .await

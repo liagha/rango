@@ -19,8 +19,8 @@ fn main() {
         .block_on(async move {
             let store = rango::store::sqlite::open(&db).await.unwrap();
             match command {
-                rango_cli::Command::Migrate => {
-                    match rango_cli::migrate(&store, &helloworld::schema()).await {
+                rango_cli::Command::Migrate { drop } => {
+                    match rango_cli::migrate(&store, &helloworld::schema(), drop).await {
                         Ok(count) => println!("migrated {count}"),
                         Err(fail) => {
                             eprintln!("migrate failed: {fail}");

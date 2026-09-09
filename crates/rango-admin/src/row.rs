@@ -1,7 +1,12 @@
 use rango::{
+    chrono::{DateTime, Utc},
     model::{Field, Model, Type},
     store::Value,
 };
+
+pub(crate) fn when(at: &DateTime<Utc>) -> String {
+    at.format("%Y-%m-%d %H:%M").to_string()
+}
 
 pub(crate) fn cell(values: &[Value], i: usize) -> String {
     text(values.get(i))
@@ -13,7 +18,7 @@ pub(crate) fn text(value: Option<&Value>) -> String {
         Some(Value::Int(value)) => value.to_string(),
         Some(Value::Float(value)) => value.to_string(),
         Some(Value::Bool(value)) => value.to_string(),
-        Some(Value::DateTime(at)) => at.format("%Y-%m-%d %H:%M").to_string(),
+        Some(Value::DateTime(at)) => when(at),
         Some(Value::Null) | None => String::new(),
     }
 }
