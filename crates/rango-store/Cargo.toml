@@ -1,0 +1,13 @@
+[package]
+name = "rango-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite", "dep:tokio"]
+
+[dependencies]
+rusqlite = { version = "0.32", optional = true }
+tokio = { workspace = true, optional = true }

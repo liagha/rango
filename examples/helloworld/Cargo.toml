@@ -1,0 +1,7 @@
+[package]
+name = "helloworld"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rango-core.workspace = true

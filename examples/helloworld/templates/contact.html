@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Contact Rango{% endblock %}
+
+{% block content %}
+<h1>Contact</h1>
+<form method="post" action="/contact">
+    <input type="hidden" name="csrf" value="{{ token }}">
+    <p>
+        <label>Name
+            <input type="text" name="name" value="{{ form.name }}" placeholder="Your name">
+        </label>
+        {% if errors.message("name") != "" %}
+        <span class="error">{{ errors.message("name") }}</span>
+        {% endif %}
+    </p>
+    <p>
+        <label>Message
+            <textarea name="message" placeholder="Your message">{{ form.message }}</textarea>
+        </label>
+        {% if errors.message("message") != "" %}
+        <span class="error">{{ errors.message("message") }}</span>
+        {% endif %}
+    </p>
+    <button type="submit">Send</button>
+</form>
+{% endblock %}

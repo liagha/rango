@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rango-core",
+    "crates/rango-store",
+    "examples/helloworld",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+rango-core = { path = "crates/rango-core", version = "0.1.0" }
+rango-store = { path = "crates/rango-store", version = "0.1.0", default-features = false }
+
+axum = { version = "0.8.9", features = ["form"] }
+askama = "0.16.1"
+tokio = { version = "1.53.1", features = ["full"] }
+tower = "0.5.2"
+tower-http = { version = "0.7.1", features = ["fs", "trace", "catch-panic"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_urlencoded = "0.7"
+uuid = { version = "1.11", features = ["v4"] }
+rusqlite = "0.32"
+tracing = "0.1"
+tracing-subscriber = "0.3"

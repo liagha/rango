@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Hello Rango{% endblock %}
+
+{% block content %}
+<h1>Hello, Rango!</h1>
+<p>This page is rendered with Askama through Rango.</p>
+<p>{% if name != "" %}Nice to meet you, {{ name }}.{% else %}What's your name?{% endif %}</p>
+
+<h2>Messages</h2>
+<ul>
+{% for message in messages %}
+<li><strong>{{ message.name }}:</strong> {{ message.message }}</li>
+{% else %}
+<li>No messages yet. <a href="/contact">Send one</a>.</li>
+{% endfor %}
+</ul>
+{% endblock %}
