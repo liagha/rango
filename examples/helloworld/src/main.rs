@@ -117,7 +117,7 @@ async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
         .unwrap_or_default()
         .is_empty();
     if empty {
-        eprintln!("no users yet — run: cargo run --bin rango -- createsuperuser");
+        eprintln!("no users yet — run: cargo run --bin rango -- create user");
     }
 }
 

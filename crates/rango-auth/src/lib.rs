@@ -300,7 +300,7 @@ impl Auth {
         if form.password != form.confirm {
             return failed("Passwords do not match.".into());
         }
-        match User::register(store, &form.username, &form.password).await {
+        match User::register(store, &form.username, &form.password, false).await {
             Ok(user) => {
                 let mut response = view::redirect("/");
                 response

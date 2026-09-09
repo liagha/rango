@@ -5,9 +5,14 @@ use rango_store::{Store, StoreError};
 
 pub enum Command {
     Migrate,
-    CreateSuperuser {
+    Create(Create),
+}
+
+pub enum Create {
+    User {
         username: Option<String>,
         password: Option<String>,
+        superuser: bool,
     },
 }
 
@@ -15,25 +20,35 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     match args.next().as_deref() {
         Some("migrate") => Ok(Command::Migrate),
-        Some("createsuperuser") => {
-            let mut username = None;
-            let mut password = None;
-            while let Some(arg) = args.next() {
-                match arg.as_str() {
-                    "--username" => username = args.next(),
-                    "--password" => password = args.next(),
-                    other => return Err(format!("unknown argument {other}")),
+        Some("create") => match args.next().as_deref() {
+            Some("user") => {
+                let mut username = None;
+                let mut password = None;
+                let mut superuser = false;
+                while let Some(arg) = args.next() {
+                    match arg.as_str() {
+                        "--username" => username = args.next(),
+                        "--password" => password = args.next(),
+                        "--super" => superuser = true,
+                        other => return Err(format!("unknown argument {other}")),
+                    }
                 }
+                Ok(Command::Create(Create::User {
+                    username,
+                    password,
+                    superuser,
+                }))
             }
-            Ok(Command::CreateSuperuser { username, password })
-        }
+            Some(other) => Err(format!("unknown create target {other}")),
+            None => Err(usage().into()),
+        },
         Some(other) => Err(format!("unknown command {other}")),
         None => Err(usage().into()),
     }
 }
 
 pub fn usage() -> &'static str {
-    "usage: rango <command>\ncommands:\n  migrate\n  createsuperuser [--username NAME] [--password PASS]"
+    "usage: rango <command>\ncommands:\n  migrate\n  create user [--username NAME] [--password PASS] [--super]"
 }
 
 pub async fn migrate(store: &Arc<dyn Store>, schemas: &[Schema]) -> Result<usize, StoreError> {

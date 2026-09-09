@@ -28,10 +28,16 @@ fn main() {
                         }
                     }
                 }
-                rango_cli::Command::CreateSuperuser { username, password } => {
+                rango_cli::Command::Create(rango_cli::Create::User {
+                    username,
+                    password,
+                    superuser,
+                }) => {
                     let username = username.unwrap_or_else(|| rango_cli::prompt("Username: "));
                     let password = password.unwrap_or_else(rango_cli::prompt_password);
-                    match rango_auth::User::register(store.clone(), &username, &password).await {
+                    match rango_auth::User::register(store.clone(), &username, &password, superuser)
+                        .await
+                    {
                         Ok(user) => println!("created user {}", user.username),
                         Err(fail) => {
                             eprintln!("error: {fail}");

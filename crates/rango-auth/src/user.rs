@@ -12,6 +12,7 @@ pub struct User {
     pub username: String,
     pub password: String,
     pub created: DateTime<Utc>,
+    pub superuser: bool,
 }
 
 impl Model for User {
@@ -25,6 +26,7 @@ impl Model for User {
             Field::new("username", Type::Str).unique(),
             Field::new("password", Type::Str),
             Field::new("created", Type::DateTime),
+            Field::new("superuser", Type::Bool).default(Value::Bool(false)),
         ]
     }
 
@@ -33,6 +35,7 @@ impl Model for User {
             Value::str(&self.username),
             Value::str(&self.password),
             Value::datetime(self.created),
+            Value::bool(self.superuser),
         ]
     }
 
@@ -42,6 +45,7 @@ impl Model for User {
             username: row.str(1)?,
             password: row.str(2)?,
             created: row.datetime(3)?,
+            superuser: row.bool(4).unwrap_or(false),
         })
     }
 
@@ -59,6 +63,7 @@ impl User {
         store: Arc<dyn Store>,
         username: &str,
         password: &str,
+        superuser: bool,
     ) -> Result<User, Error> {
         let username = username.trim();
         if username.is_empty() {
@@ -76,6 +81,7 @@ impl User {
             username: username.into(),
             password: hash,
             created: Utc::now(),
+            superuser,
         };
         match Repository::new(store).save(&mut user).await {
             Ok(()) => Ok(user),
