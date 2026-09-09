@@ -537,6 +537,7 @@ dependencies = [
  "askama",
  "axum",
  "rango-core",
+ "serde_urlencoded",
 ]
 
 [[package]]

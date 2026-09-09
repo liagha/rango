@@ -1,21 +1,51 @@
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>{{ title }}</title>
-<style>body{font-family:sans-serif;max-width:60rem;margin:2rem auto}a{color:#06c}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.3rem .6rem}</style>
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}{{ title }} · Admin{% endblock %}
+{% block nav %}<a href="../">Admin</a> / {{ title }}{% endblock %}
+{% block main %}
 <h1>{{ title }}</h1>
-<p><a href="new/">Add</a> · <a href="../">Admin</a></p>
+<p><a class="btn" href="new/">Add</a></p>
+<form class="bar" method="get" action="?">
+<input type="search" name="q" value="{{ q }}" placeholder="Search {{ title }}…">
+{% if !sort.is_empty() %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+<button type="submit">Search</button>
+<a href="?">Clear</a>
+</form>
+{% if !filters.is_empty() %}
+<details>
+<summary>Filters</summary>
+<form method="get" action="?">
+<input type="hidden" name="q" value="{{ q }}">
+{% if !sort.is_empty() %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+<div class="filters">
+{% for filter in filters %}
+<div>{{ filter|safe }}</div>
+{% endfor %}
+</div>
+<p class="actions"><button type="submit">Apply</button><a href="?">Clear</a></p>
+</form>
+</details>
+{% endif %}
+<p class="muted">{{ total }} row{% if total != 1 %}s{% endif %}{% if pages > 1 %} · page {{ page }} of {{ pages }}{% endif %}</p>
+{% if rows.is_empty() %}
+<p class="muted">No rows match.</p>
+{% else %}
 <table>
-<tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+<tbody>
+<tr>{% for column in columns %}<th><a href="{{ column.href }}">{{ column.name }} {{ column.marker }}</a></th>{% endfor %}</tr>
 {% for row in rows %}
 <tr>
 <td><a href="{{ row.id }}/">{{ row.id }}</a></td>
 {% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}
 </tr>
 {% endfor %}
+</tbody>
 </table>
-</body>
-</html>
+{% endif %}
+{% if pages > 1 %}
+<div class="pager">
+{% if let Some(href) = prev %}<a href="{{ href }}">← Prev</a>{% endif %}
+<span class="muted">Page {{ page }} of {{ pages }}</span>
+{% if let Some(href) = next %}<a href="{{ href }}">Next →</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

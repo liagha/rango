@@ -1,11 +1,12 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use askama::Template;
 use axum::{
-    extract::{Extension, Form, OriginalUri, Path},
+    extract::{Extension, Form, OriginalUri, Path, Query},
     http::{HeaderMap, Uri, header::COOKIE},
     routing::{get, post},
 };
@@ -33,10 +34,12 @@ impl Admin {
         let guard = models.clone();
         let routes = Routes::new().route(
             "/",
-            get(move |store: Extension<Arc<dyn Store>>, OriginalUri(uri): OriginalUri| {
-                let models = guard.clone();
-                async move { dashboard(models, store, uri).await }
-            }),
+            get(
+                move |store: Extension<Arc<dyn Store>>, OriginalUri(uri): OriginalUri| {
+                    let models = guard.clone();
+                    async move { dashboard(models, store, uri).await }
+                },
+            ),
         );
         Self { routes, models }
     }
@@ -91,8 +94,22 @@ struct Entry {
 #[template(path = "list.html")]
 struct List {
     title: &'static str,
-    columns: Vec<String>,
+    q: String,
+    sort: String,
+    filters: Vec<String>,
+    columns: Vec<Column>,
     rows: Vec<Item>,
+    total: usize,
+    page: usize,
+    pages: usize,
+    prev: Option<String>,
+    next: Option<String>,
+}
+
+struct Column {
+    name: String,
+    marker: &'static str,
+    href: String,
 }
 
 struct Item {
@@ -104,6 +121,10 @@ struct Item {
 #[template(path = "form.html")]
 struct FormView {
     title: String,
+    model: &'static str,
+    home: &'static str,
+    up: &'static str,
+    sub: String,
     token: String,
     inputs: Vec<String>,
 }
@@ -150,8 +171,21 @@ fn back(uri: &Uri, drop: usize) -> String {
     format!("/{}/", parts.join("/"))
 }
 
+const PAGE: usize = 25;
+
+fn flat(kind: &Kind) -> &Kind {
+    match kind {
+        Kind::Optional(inner) => inner.as_ref(),
+        kind => kind,
+    }
+}
+
 fn cell(values: &[Value], i: usize) -> String {
-    match values.get(i) {
+    text(values.get(i))
+}
+
+fn text(value: Option<&Value>) -> String {
+    match value {
         Some(Value::Str(value)) => value.clone(),
         Some(Value::Int(value)) => value.to_string(),
         Some(Value::Float(value)) => value.to_string(),
@@ -202,10 +236,7 @@ fn display(value: Option<&Value>) -> String {
 fn input(field: &Field, value: Option<&Value>) -> String {
     let name = field.name;
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
-    let kind = match &field.kind {
-        Kind::Optional(inner) => inner.as_ref(),
-        kind => kind,
-    };
+    let kind = flat(&field.kind);
     match kind {
         Kind::Id | Kind::Optional(_) => String::new(),
         Kind::Str => {
@@ -235,10 +266,7 @@ fn bad(field: &Field, want: &str) -> Error {
 }
 
 fn parse(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
-    let kind = match &field.kind {
-        Kind::Optional(inner) => inner.as_ref(),
-        kind => kind,
-    };
+    let kind = flat(&field.kind);
     let raw = raw.map(String::as_str).unwrap_or("");
     if raw.is_empty() && matches!(kind, Kind::Bool) {
         return Ok(Value::bool(false));
@@ -262,6 +290,124 @@ fn parse(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
             .map(Value::float)
             .map_err(|_| bad(field, "a number")),
         Kind::Bool => Ok(Value::bool(raw == "on")),
+    }
+}
+
+fn has(fields: &[Field], values: &[Value], query: &str, params: &HashMap<String, String>) -> bool {
+    if !query.is_empty() {
+        let found = fields.iter().enumerate().any(|(i, field)| {
+            matches!(flat(&field.kind), Kind::Str)
+                && text(values.get(i)).to_lowercase().contains(query)
+        });
+        if !found {
+            return false;
+        }
+    }
+    fields.iter().enumerate().all(|(i, field)| {
+        if field.kind == Kind::Id {
+            return true;
+        }
+        match params.get(field.name) {
+            Some(raw) if !raw.is_empty() => filter_hit(field, values.get(i), raw),
+            _ => true,
+        }
+    })
+}
+
+fn filter_hit(field: &Field, value: Option<&Value>, raw: &str) -> bool {
+    match flat(&field.kind) {
+        Kind::Id | Kind::Optional(_) => true,
+        Kind::Str => text(value).to_lowercase().contains(&raw.to_lowercase()),
+        Kind::Int | Kind::DateTime => match (value, raw.parse::<i64>()) {
+            (Some(Value::Int(have)), Ok(want)) => *have == want,
+            _ => false,
+        },
+        Kind::Float => match (value, raw.parse::<f64>()) {
+            (Some(Value::Float(have)), Ok(want)) => *have == want,
+            _ => false,
+        },
+        Kind::Bool => match value {
+            Some(Value::Bool(have)) => *have == truthy(raw),
+            _ => false,
+        },
+    }
+}
+
+fn truthy(raw: &str) -> bool {
+    matches!(raw, "1" | "true" | "on" | "yes")
+}
+
+fn compare(one: Option<&Value>, other: Option<&Value>) -> Ordering {
+    match (one, other) {
+        (Some(Value::Int(one)), Some(Value::Int(other))) => one.cmp(other),
+        (Some(Value::Float(one)), Some(Value::Float(other))) => one.total_cmp(other),
+        (Some(Value::Str(one)), Some(Value::Str(other))) => one.cmp(other),
+        (Some(Value::Bool(one)), Some(Value::Bool(other))) => one.cmp(other),
+        (Some(Value::Null) | None, Some(Value::Null) | None) => Ordering::Equal,
+        (Some(Value::Null) | None, _) => Ordering::Greater,
+        (_, Some(Value::Null) | None) => Ordering::Less,
+        _ => Ordering::Equal,
+    }
+}
+
+fn sort_rows(fields: &[Field], rows: &mut [Vec<Value>], sort: &str) {
+    if sort.is_empty() {
+        return;
+    }
+    let (name, down) = match sort.strip_prefix('-') {
+        Some(name) => (name, true),
+        None => (sort, false),
+    };
+    let Some(at) = fields.iter().position(|field| field.name == name) else {
+        return;
+    };
+    rows.sort_by(|one, other| {
+        let order = compare(one.get(at), other.get(at));
+        if down { order.reverse() } else { order }
+    });
+}
+
+fn qs(params: &HashMap<String, String>, skip: &[&str]) -> String {
+    let mut pairs: Vec<(&String, &String)> = params
+        .iter()
+        .filter(|(key, _)| !skip.contains(&key.as_str()))
+        .collect();
+    pairs.sort();
+    serde_urlencoded::to_string(pairs).unwrap_or_default()
+}
+
+fn with(base: &str, extra: &str) -> String {
+    if base.is_empty() {
+        format!("?{extra}")
+    } else {
+        format!("?{base}&{extra}")
+    }
+}
+
+fn filter_input(field: &Field, value: &str) -> String {
+    let name = field.name;
+    let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
+    let value = escape(value);
+    match flat(&field.kind) {
+        Kind::Id | Kind::Optional(_) => String::new(),
+        Kind::Str => {
+            format!(
+                r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
+            )
+        }
+        Kind::Int | Kind::DateTime | Kind::Float => {
+            format!(
+                r#"{label}<input id="filter-{name}" name="{name}" type="number" value="{value}">"#
+            )
+        }
+        Kind::Bool => {
+            let picked = |want: &str| if value == want { " selected" } else { "" };
+            format!(
+                r#"{label}<select id="filter-{name}" name="{name}"><option value="">Any</option><option value="1"{}>Yes</option><option value="0"{}>No</option></select>"#,
+                picked("1"),
+                picked("0")
+            )
+        }
     }
 }
 
@@ -297,22 +443,83 @@ async fn dashboard(
     render(Dashboard { entries: items })
 }
 
-async fn list<M: Model>(repo: Repo<M>) -> Result<Response, Error> {
+async fn list<M: Model>(
+    repo: Repo<M>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Error> {
     let fields = M::fields();
     let at = positions(&fields);
-    let columns: Vec<String> = at.iter().map(|&i| fields[i].name.to_string()).collect();
-    let mut rows = Vec::new();
+    let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
+    let sort = params.get("sort").cloned().unwrap_or_default();
+    let mut rows: Vec<Vec<Value>> = Vec::new();
     for model in repo.all().await? {
         let values = full(&model, &fields);
-        rows.push(Item {
-            id: id_of(&values, &fields),
-            cells: at.iter().map(|&i| cell(&values, i)).collect(),
+        if has(&fields, &values, &query, &params) {
+            rows.push(values);
+        }
+    }
+    let total = rows.len();
+    sort_rows(&fields, &mut rows, &sort);
+    let pages = total.div_ceil(PAGE);
+    let page = params
+        .get("page")
+        .and_then(|page| page.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, pages.max(1));
+    let start = (page - 1) * PAGE;
+    let end = (start + PAGE).min(total);
+
+    let bare = qs(&params, &["page", "sort"]);
+    let kept = qs(&params, &["page"]);
+    let columns = at
+        .iter()
+        .map(|&i| {
+            let name = fields[i].name;
+            let (marker, toggle) = if sort == name {
+                ("▲", format!("-{name}"))
+            } else if sort == format!("-{name}") {
+                ("▼", name.to_string())
+            } else {
+                ("", name.to_string())
+            };
+            Column {
+                name: name.to_string(),
+                marker,
+                href: with(&bare, &format!("sort={toggle}")),
+            }
+        })
+        .collect();
+    let mut items = Vec::new();
+    for values in &rows[start..end] {
+        items.push(Item {
+            id: id_of(values, &fields),
+            cells: at.iter().map(|&i| cell(values, i)).collect(),
         });
     }
+    let filters = fields
+        .iter()
+        .filter(|field| field.kind != Kind::Id)
+        .map(|field| {
+            filter_input(
+                field,
+                params.get(field.name).map(String::as_str).unwrap_or(""),
+            )
+        })
+        .collect();
+    let prev = (page > 1).then(|| with(&kept, &format!("page={}", page - 1)));
+    let next = (page < pages).then(|| with(&kept, &format!("page={}", page + 1)));
     render(List {
         title: M::table(),
+        q: params.get("q").cloned().unwrap_or_default(),
+        sort,
+        filters,
         columns,
-        rows,
+        rows: items,
+        total,
+        page,
+        pages,
+        prev,
+        next,
     })
 }
 
@@ -364,6 +571,10 @@ async fn show_new<M: Model>(
         .collect();
     render(FormView {
         title: format!("New {}", M::table()),
+        model: M::table(),
+        home: "../",
+        up: "./",
+        sub: "New".into(),
         token: token(&headers, guard),
         inputs,
     })
@@ -406,6 +617,10 @@ async fn show_edit<M: Model>(
     }
     render(FormView {
         title: format!("Edit {} {id}", M::table()),
+        model: M::table(),
+        home: "../../",
+        up: "../",
+        sub: format!("Edit {id}"),
         token: token(&headers, guard),
         inputs,
     })
@@ -431,7 +646,11 @@ async fn replace<M: Model>(
     Ok(view::redirect(&back(&uri, 1)))
 }
 
-async fn remove<M: Model>(repo: Repo<M>, OriginalUri(uri): OriginalUri, Path(id): Path<i64>) -> Result<Response, Error> {
+async fn remove<M: Model>(
+    repo: Repo<M>,
+    OriginalUri(uri): OriginalUri,
+    Path(id): Path<i64>,
+) -> Result<Response, Error> {
     repo.delete(id).await?;
     Ok(view::redirect(&back(&uri, 2)))
 }

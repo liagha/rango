@@ -1,18 +1,13 @@
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>{{ title }}</title>
-<style>body{font-family:sans-serif;max-width:40rem;margin:2rem auto}a{color:#06c}label{display:block;margin-top:1rem}input{width:100%;padding:.4rem}</style>
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}{{ title }} · Admin{% endblock %}
+{% block nav %}<a href="{{ home }}">Admin</a> / <a href="{{ up }}">{{ model }}</a> / {{ sub }}{% endblock %}
+{% block main %}
 <h1>{{ title }}</h1>
 <form method="post">
 <input type="hidden" name="csrf" value="{{ token }}">
 {% for input in inputs %}
-<p>{{ input|safe }}</p>
+<div class="field">{{ input|safe }}</div>
 {% endfor %}
-<p><button type="submit">Save</button></p>
+<p class="actions"><button type="submit">Save</button><a href="{{ up }}">Cancel</a></p>
 </form>
-</body>
-</html>
+{% endblock %}

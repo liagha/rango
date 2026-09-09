@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rango-core = { workspace = true, features = ["csrf"] }
+rango-core.workspace = true
 askama.workspace = true
 axum.workspace = true
+serde_urlencoded.workspace = true

@@ -1,16 +1,13 @@
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Admin</title>
-<style>body{font-family:sans-serif;max-width:40rem;margin:2rem auto}a{color:#06c}li{margin:.4rem 0}.count{color:#666}</style>
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Admin{% endblock %}
+{% block main %}
 <h1>Admin</h1>
-<ul>
+<table>
+<tbody>
+<tr><th>Model</th><th>Rows</th></tr>
 {% for entry in entries %}
-<li><a href="{{ entry.href }}">{{ entry.title }}</a> <span class="count">({{ entry.count }})</span></li>
+<tr><td><a href="{{ entry.href }}">{{ entry.title }}</a></td><td>{{ entry.count }}</td></tr>
 {% endfor %}
-</ul>
-</body>
-</html>
+</tbody>
+</table>
+{% endblock %}
