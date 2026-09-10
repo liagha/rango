@@ -734,7 +734,7 @@ async fn remove<M: Model>(
 
 #[macro_export]
 macro_rules! manage {
-    ($schema:expr, $db:expr) => {
+    ($schema:expr, $db:expr, $open:path) => {
         fn main() {
             let db = $db;
             let mut args = std::env::args().skip(1).peekable();
@@ -754,7 +754,7 @@ macro_rules! manage {
                 .build()
                 .unwrap()
                 .block_on(async move {
-                    let store = rango::store::sqlite::open(db).await.unwrap();
+                    let store = $open(db).await.unwrap();
                     match command {
                         rango_cli::Command::Migrate { drop } => {
                             match rango_cli::migrate(&store, &$schema, drop).await {
