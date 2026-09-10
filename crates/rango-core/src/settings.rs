@@ -7,9 +7,6 @@ pub struct Settings {
     pub forgery: bool,
     pub secret: Option<String>,
     pub assets: PathBuf,
-    pub api_url: String,
-    pub ws_url: String,
-    pub ws_port: u16,
 }
 
 impl Settings {
@@ -22,9 +19,6 @@ impl Settings {
             forgery: true,
             secret: None,
             assets: cwd.join("assets"),
-            api_url: String::new(),
-            ws_url: String::new(),
-            ws_port: 0,
         }
     }
 
@@ -50,21 +44,6 @@ impl Settings {
 
     pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.assets = dir.into().join("assets");
-        self
-    }
-
-    pub fn api_url(mut self, url: impl Into<String>) -> Self {
-        self.api_url = url.into();
-        self
-    }
-
-    pub fn ws_url(mut self, url: impl Into<String>) -> Self {
-        self.ws_url = url.into();
-        self
-    }
-
-    pub fn ws_port(mut self, port: u16) -> Self {
-        self.ws_port = port;
         self
     }
 }

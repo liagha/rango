@@ -16,8 +16,31 @@ pub enum Create {
     },
 }
 
+#[derive(Debug)]
+pub enum Fail {
+    Usage(String),
+    Error(String),
+}
+
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage(msg) | Self::Error(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for Fail {}
+
+pub fn code(fail: &Fail) -> i32 {
+    match fail {
+        Fail::Usage(_) => 2,
+        Fail::Error(_) => 1,
+    }
+}
+
 #[allow(clippy::while_let_on_iterator)]
-pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
+pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
     let mut args = args.peekable();
     match args.next().as_deref() {
         Some("migrate") => {
@@ -25,7 +48,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--drop" => drop = true,
-                    other => return Err(format!("unknown argument {other}")),
+                    other => return Err(Fail::Usage(format!("unknown argument {other}"))),
                 }
             }
             Ok(Command::Migrate { drop })
@@ -40,7 +63,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
                         "--username" => username = args.next(),
                         "--password" => password = args.next(),
                         "--super" => superuser = true,
-                        other => return Err(format!("unknown argument {other}")),
+                        other => return Err(Fail::Usage(format!("unknown argument {other}"))),
                     }
                 }
                 Ok(Command::Create(Create::User {
@@ -49,11 +72,11 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
                     superuser,
                 }))
             }
-            Some(other) => Err(format!("unknown create target {other}")),
-            None => Err(usage().into()),
+            Some(other) => Err(Fail::Usage(format!("unknown create target {other}"))),
+            None => Err(Fail::Usage(usage().into())),
         },
-        Some(other) => Err(format!("unknown command {other}")),
-        None => Err(usage().into()),
+        Some(other) => Err(Fail::Usage(format!("unknown command {other}"))),
+        None => Err(Fail::Usage(usage().into())),
     }
 }
 
@@ -61,62 +84,33 @@ pub fn usage() -> &'static str {
     "usage: app [command]\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]"
 }
 
-#[macro_export]
-macro_rules! rango {
-    ($runtime:expr, $store:expr, $schema:expr) => {
-        if $runtime.block_on(rango_cli::manage(
-            &$store,
-            &$schema,
-            std::env::args().skip(1),
-        )) {
-            return;
-        }
-    };
-}
-
-pub async fn manage(
+pub async fn exec(
     store: &Arc<dyn Store>,
     schemas: &[Schema],
-    args: impl Iterator<Item = String>,
-) -> bool {
-    let mut args = args.peekable();
-    match args.peek().map(String::as_str) {
-        None => return false,
-        Some("-h") | Some("--help") => {
-            println!("{}", usage());
-            return true;
-        }
-        _ => {}
-    }
-    let command = parse(args).unwrap_or_else(|fail| {
-        eprintln!("{fail}");
-        std::process::exit(2);
-    });
+    command: Command,
+) -> Result<String, Fail> {
     match command {
-        Command::Migrate { drop } => match migrate(store, schemas, drop).await {
-            Ok(count) => println!("migrated {count}"),
-            Err(fail) => {
-                eprintln!("migrate failed: {fail}");
-                std::process::exit(1);
-            }
-        },
+        Command::Migrate { drop } => migrate(store, schemas, drop)
+            .await
+            .map(|count| format!("migrated {count}"))
+            .map_err(|fail| Fail::Error(format!("migrate failed: {fail}"))),
         Command::Create(Create::User {
             username,
             password,
             superuser,
         }) => {
-            let username = username.unwrap_or_else(|| prompt("Username: "));
-            let password = password.unwrap_or_else(prompt_password);
+            let Some(username) = username else {
+                return Err(Fail::Usage("create user needs --username NAME".into()));
+            };
+            let Some(password) = password else {
+                return Err(Fail::Usage("create user needs --password PASS".into()));
+            };
             match rango_auth::User::register(store.clone(), &username, &password, superuser).await {
-                Ok(user) => println!("created user {}", user.username),
-                Err(fail) => {
-                    eprintln!("error: {fail}");
-                    std::process::exit(1);
-                }
+                Ok(user) => Ok(format!("created user {}", user.username)),
+                Err(fail) => Err(Fail::Error(fail.to_string())),
             }
         }
     }
-    true
 }
 
 pub async fn migrate(

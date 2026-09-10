@@ -40,10 +40,14 @@ fn signed(token: &str) -> HeaderValue {
 }
 
 pub fn cookie(headers: &HeaderMap) -> Option<String> {
+    named(headers, NAME)
+}
+
+pub fn named(headers: &HeaderMap, name: &str) -> Option<String> {
     let value = headers.get(COOKIE)?.to_str().ok()?;
     value.split(';').map(str::trim).find_map(|part| {
-        let (name, value) = part.split_once('=')?;
-        (name == NAME).then(|| value.to_string())
+        let (key, value) = part.split_once('=')?;
+        (key == name).then(|| value.to_string())
     })
 }
 

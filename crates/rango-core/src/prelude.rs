@@ -1,7 +1,7 @@
 pub use crate::app::App;
 pub use crate::error::Error;
 #[cfg(feature = "forgery")]
-pub use crate::forgery::{Token, cookie, guard, token};
+pub use crate::forgery::{Token, cookie, guard, named, token};
 pub use crate::form::{Errors, FieldError, Form, Valid};
 pub use crate::model::{Field, Model, Repository, Schema, Type, id_column, key};
 pub use crate::settings::Settings;

@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, LitStr, Expr, ExprLit};
+use syn::{Data, DeriveInput, Expr, ExprLit, Fields, LitStr};
 
 #[proc_macro_derive(Model, attributes(model, key, references, default))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -28,9 +28,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut from_fields = Vec::new();
     let mut set_id_stmt = None;
     let mut id_expr = None;
-    let mut idx = 0usize;
 
-    for field in fields {
+    for (idx, field) in fields.into_iter().enumerate() {
         let ident = field.ident.as_ref().unwrap();
         let attrs = &field.attrs;
         let ty = &field.ty;
@@ -243,7 +242,6 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             row_exprs.push(row_expr);
         }
         from_fields.push(quote! { #ident: #from_expr });
-        idx += 1;
     }
 
     let set_id = set_id_stmt.unwrap_or_else(|| quote! { let _ = id; });
@@ -322,7 +320,8 @@ fn parse_default(attrs: &[syn::Attribute]) -> syn::Result<Option<proc_macro2::To
         if let Expr::Lit(ExprLit {
             lit: syn::Lit::Str(s),
             ..
-        }) = expr {
+        }) = expr
+        {
             let val = s.value();
             return Ok(Some(quote! { rango::Value::str(#val) }));
         }
@@ -332,16 +331,13 @@ fn parse_default(attrs: &[syn::Attribute]) -> syn::Result<Option<proc_macro2::To
 }
 
 fn unpack_option(ty: &syn::Type) -> (&syn::Type, bool) {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(segment) = tp.path.segments.last() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return (inner, true);
-                    }
-                }
-            }
-        }
+    if let syn::Type::Path(tp) = ty
+        && let Some(segment) = tp.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return (inner, true);
     }
     (ty, false)
 }
@@ -374,7 +370,9 @@ enum Kind {
 fn kind_of(name: &str) -> Kind {
     match name {
         "String" | "str" => Kind::Str,
-        "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => Kind::Int,
+        "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
+            Kind::Int
+        }
         "f64" | "f32" => Kind::Float,
         "bool" => Kind::Bool,
         "DateTime" | "DateTime<Utc>" => Kind::Date,

@@ -23,18 +23,13 @@ pub struct App {
 type Ready = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 impl App {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(settings: Settings, store: Arc<dyn Store>) -> Self {
         Self {
             settings,
-            store: crate::store::memory(),
+            store,
             router: Router::new(),
             ready: None,
         }
-    }
-
-    pub fn store(mut self, store: Arc<dyn Store>) -> Self {
-        self.store = store;
-        self
     }
 
     pub fn urls(mut self, routes: Routes) -> Self {
@@ -87,17 +82,15 @@ impl App {
         }
         let address = (self.settings.host.as_str(), self.settings.port);
         let listener = tokio::net::TcpListener::bind(address).await?;
-        tracing::info!("rango running on http://{}", self.settings.port);
+        tracing::info!(
+            "rango running on http://{}:{}",
+            self.settings.host,
+            self.settings.port
+        );
         if let Some(ready) = self.ready.take() {
             ready().await;
         }
         axum::serve(listener, self.build()).await
-    }
-
-    pub fn serve(self) -> Result<(), std::io::Error> {
-        let _ = tracing_subscriber::fmt().try_init();
-        let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(self.run())
     }
 }
 

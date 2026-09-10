@@ -667,6 +667,8 @@ dependencies = [
  "rango-auth",
  "rango-cli",
  "rango-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -15,7 +15,7 @@ pub use store::{Column, ColumnKind, Row, Store, StoreError, Value};
 pub use app::App;
 pub use error::Error;
 #[cfg(feature = "forgery")]
-pub use forgery::{Token, cookie, guard, token};
+pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
 pub use model::{Field, Model, Repository, Schema, Type, id_column, key};
 pub use settings::Settings;

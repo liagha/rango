@@ -6,13 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{
-    extract::OriginalUri,
-    http::{HeaderMap, header::COOKIE},
-};
+use axum::extract::OriginalUri;
+#[cfg(feature = "views")]
+use axum::http::HeaderMap;
 use hmac::{Hmac, Mac};
 #[cfg(feature = "views")]
 use rango::forgery::Token;
+pub(crate) use rango::forgery::named as cookie;
 use rango::view::Request;
 use sha2::Sha256;
 
@@ -72,18 +72,6 @@ impl Attempts {
         self.hits
             .retain(|_, (_, since)| now.duration_since(*since) < window);
     }
-}
-
-pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').map(str::trim).find_map(|part| {
-                let (key, value) = part.split_once('=')?;
-                (key == name).then(|| value.to_string())
-            })
-        })
 }
 
 #[cfg(feature = "views")]
@@ -193,6 +181,7 @@ fn hex_decode(raw: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header::COOKIE;
 
     #[test]
     fn cookie_ok() {

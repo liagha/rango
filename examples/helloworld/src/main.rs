@@ -1,8 +1,9 @@
+use std::process::ExitCode;
+
 use helloworld::Message;
 use rango::chrono::Utc;
 use rango::prelude::*;
 use rango_auth::Current;
-use rango_cli::rango;
 
 #[derive(Template)]
 #[template(path = "index.html", askama = rango::askama)]
@@ -104,13 +105,6 @@ async fn thanks() -> Result<Response, Error> {
     render(Thanks)
 }
 
-fn secret() -> String {
-    std::env::var("RANGO_SECRET").unwrap_or_else(|_| {
-        eprintln!("error: set RANGO_SECRET to a long random value");
-        std::process::exit(1);
-    })
-}
-
 async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
     let empty = Repository::<rango_auth::User>::new(store.clone())
         .all()
@@ -122,21 +116,70 @@ async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
     }
 }
 
-fn main() {
-    let store = {
-        let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-        let runtime = rango::tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let store = runtime
-            .block_on(rango::store::sqlite::open(&db))
-            .unwrap();
-        rango!(runtime, store, helloworld::schema());
-        runtime.block_on(hint(&store));
-        store
+fn fill(mut command: rango_cli::Command) -> rango_cli::Command {
+    if let rango_cli::Command::Create(rango_cli::Create::User {
+        username,
+        password,
+        superuser: _,
+    }) = &mut command
+    {
+        if username.is_none() {
+            *username = Some(rango_cli::prompt("Username: "));
+        }
+        if password.is_none() {
+            *password = Some(rango_cli::prompt_password());
+        }
+    }
+    command
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt().init();
+    let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
+    let store = match rango::store::sqlite::open(&db).await {
+        Ok(store) => store,
+        Err(fail) => {
+            eprintln!("error: {fail}");
+            return ExitCode::FAILURE;
+        }
     };
-    let secret = secret();
+    let schemas = helloworld::schema();
+    let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        None => {}
+        Some("-h") | Some("--help") => {
+            println!("{}", rango_cli::usage());
+            return ExitCode::SUCCESS;
+        }
+        _ => {
+            let command = match rango_cli::parse(args) {
+                Ok(command) => fill(command),
+                Err(fail) => {
+                    eprintln!("{fail}");
+                    return ExitCode::from(rango_cli::code(&fail) as u8);
+                }
+            };
+            match rango_cli::exec(&store, &schemas, command).await {
+                Ok(done) => {
+                    println!("{done}");
+                    return ExitCode::SUCCESS;
+                }
+                Err(fail) => {
+                    eprintln!("{fail}");
+                    return ExitCode::from(rango_cli::code(&fail) as u8);
+                }
+            }
+        }
+    }
+    hint(&store).await;
+    let secret = match std::env::var("RANGO_SECRET") {
+        Ok(secret) => secret,
+        Err(_) => {
+            eprintln!("error: set RANGO_SECRET to a long random value");
+            return ExitCode::FAILURE;
+        }
+    };
     let settings = Settings::new()
         .base_dir(env!("CARGO_MANIFEST_DIR"))
         .secret(&secret);
@@ -145,8 +188,7 @@ fn main() {
         .model::<Message>()
         .model::<helloworld::Product>()
         .model::<helloworld::Category>();
-    App::new(settings)
-        .store(store)
+    match App::new(settings, store)
         .urls(
             auth.session(
                 Routes::new()
@@ -160,6 +202,13 @@ fn main() {
         .urls(auth.routes())
         .mount("/admin/", auth.require_superuser(panel.routes()))
         .mount_static()
-        .serve()
-        .unwrap();
+        .run()
+        .await
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(fail) => {
+            eprintln!("error: {fail}");
+            ExitCode::FAILURE
+        }
+    }
 }

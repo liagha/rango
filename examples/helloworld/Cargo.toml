@@ -8,3 +8,5 @@ rango-core.workspace = true
 rango-admin.workspace = true
 rango-auth.workspace = true
 rango-cli.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

@@ -1,7 +1,7 @@
+use rango::Model;
 use rango::chrono::{DateTime, Utc};
 use rango::decimal::Decimal;
 use rango::prelude::*;
-use rango::Model;
 
 #[derive(Clone, Model)]
 #[model(table = "messages")]

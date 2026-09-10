@@ -1,9 +1,7 @@
-mod memory;
-
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, pin::Pin};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -145,7 +143,6 @@ pub type Rows = Vec<Row>;
 pub enum StoreError {
     Sql(String),
     Value(String),
-    Poison(String),
     Channel(String),
     Io(String),
     Unsupported(String),
@@ -156,7 +153,6 @@ impl fmt::Display for StoreError {
         match self {
             Self::Sql(msg)
             | Self::Value(msg)
-            | Self::Poison(msg)
             | Self::Channel(msg)
             | Self::Io(msg)
             | Self::Unsupported(msg) => write!(f, "{msg}"),
@@ -207,10 +203,6 @@ pub trait Store: Send + Sync + 'static {
             self.last_id(table).await
         })
     }
-}
-
-pub fn memory() -> Arc<dyn Store> {
-    Arc::new(memory::Memory::default())
 }
 
 #[cfg(test)]
