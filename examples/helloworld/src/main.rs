@@ -2,6 +2,7 @@ use helloworld::Message;
 use rango::chrono::Utc;
 use rango::prelude::*;
 use rango_auth::Current;
+use rango_cli::rango;
 
 #[derive(Template)]
 #[template(path = "index.html", askama = rango::askama)]
@@ -117,25 +118,23 @@ async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
         .unwrap_or_default()
         .is_empty();
     if empty {
-        eprintln!("no users yet — run: cargo run --bin rango -- create user");
+        eprintln!("no users yet — run: cargo run -- create user");
     }
 }
 
 fn main() {
+    let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
+    let runtime = rango::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let store = runtime.block_on(rango::store::sqlite::open(&db)).unwrap();
+    rango!(runtime, store, helloworld::schema());
     let secret = secret();
     let settings = Settings::new()
         .base_dir(env!("CARGO_MANIFEST_DIR"))
         .secret(&secret);
-    let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-    let store = rango::tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let store = rango::store::sqlite::open(&db).await.unwrap();
-            hint(&store).await;
-            store
-        });
+    runtime.block_on(hint(&store));
     let auth = rango_auth::Auth::new(&secret).signup(true);
     let panel = rango_admin::Admin::new()
         .model::<Message>()

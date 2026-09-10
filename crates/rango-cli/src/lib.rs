@@ -58,7 +58,65 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
 }
 
 pub fn usage() -> &'static str {
-    "usage: rango <command>\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]"
+    "usage: app [command]\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]"
+}
+
+#[macro_export]
+macro_rules! rango {
+    ($runtime:expr, $store:expr, $schema:expr) => {
+        if $runtime.block_on(rango_cli::manage(
+            &$store,
+            &$schema,
+            std::env::args().skip(1),
+        )) {
+            return;
+        }
+    };
+}
+
+pub async fn manage(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    args: impl Iterator<Item = String>,
+) -> bool {
+    let mut args = args.peekable();
+    match args.peek().map(String::as_str) {
+        None => return false,
+        Some("-h") | Some("--help") => {
+            println!("{}", usage());
+            return true;
+        }
+        _ => {}
+    }
+    let command = parse(args).unwrap_or_else(|fail| {
+        eprintln!("{fail}");
+        std::process::exit(2);
+    });
+    match command {
+        Command::Migrate { drop } => match migrate(store, schemas, drop).await {
+            Ok(count) => println!("migrated {count}"),
+            Err(fail) => {
+                eprintln!("migrate failed: {fail}");
+                std::process::exit(1);
+            }
+        },
+        Command::Create(Create::User {
+            username,
+            password,
+            superuser,
+        }) => {
+            let username = username.unwrap_or_else(|| prompt("Username: "));
+            let password = password.unwrap_or_else(prompt_password);
+            match rango_auth::User::register(store.clone(), &username, &password, superuser).await {
+                Ok(user) => println!("created user {}", user.username),
+                Err(fail) => {
+                    eprintln!("error: {fail}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    true
 }
 
 pub async fn migrate(
