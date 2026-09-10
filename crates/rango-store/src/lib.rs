@@ -45,6 +45,21 @@ impl Value {
     }
 }
 
+impl From<&String> for Value {
+    fn from(value: &String) -> Self {
+        Self::Str(value.clone())
+    }
+}
+
+impl From<&Option<String>> for Value {
+    fn from(value: &Option<String>) -> Self {
+        match value {
+            Some(value) => Self::Str(value.clone()),
+            None => Self::Null,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnKind {
     Integer,
@@ -86,6 +101,13 @@ impl Row {
         match self.values.get(i) {
             Some(Value::Str(value)) => Ok(value.clone()),
             _ => Err(StoreError::Value(format!("row column {i} not str"))),
+        }
+    }
+
+    pub fn opt_str(&self, i: usize) -> Option<String> {
+        match self.values.get(i) {
+            Some(Value::Str(value)) => Some(value.clone()),
+            _ => None,
         }
     }
 
@@ -189,4 +211,24 @@ pub trait Store: Send + Sync + 'static {
 
 pub fn memory() -> Arc<dyn Store> {
     Arc::new(memory::Memory::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt() {
+        let row = Row {
+            values: vec![Value::Str("a".into()), Value::Null, Value::Int(3)],
+        };
+        assert_eq!(row.opt_str(0), Some("a".into()));
+        assert_eq!(row.opt_str(1), None);
+        assert_eq!(row.opt_str(2), None);
+        assert_eq!(row.opt_str(9), None);
+        assert_eq!(Value::from(&"a".to_string()), Value::Str("a".into()));
+        assert_eq!(Value::from(&Some("a".to_string())), Value::Str("a".into()));
+        let none: Option<String> = None;
+        assert_eq!(Value::from(&none), Value::Null);
+    }
 }

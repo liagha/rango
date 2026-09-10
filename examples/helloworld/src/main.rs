@@ -123,18 +123,23 @@ async fn hint(store: &std::sync::Arc<dyn rango::Store>) {
 }
 
 fn main() {
-    let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
-    let runtime = rango::tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let store = runtime.block_on(rango::store::sqlite::open(&db)).unwrap();
-    rango!(runtime, store, helloworld::schema());
+    let store = {
+        let db = format!("{}/rango.sqlite", env!("CARGO_MANIFEST_DIR"));
+        let runtime = rango::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = runtime
+            .block_on(rango::store::sqlite::open(&db))
+            .unwrap();
+        rango!(runtime, store, helloworld::schema());
+        runtime.block_on(hint(&store));
+        store
+    };
     let secret = secret();
     let settings = Settings::new()
         .base_dir(env!("CARGO_MANIFEST_DIR"))
         .secret(&secret);
-    runtime.block_on(hint(&store));
     let auth = rango_auth::Auth::new(&secret).signup(true);
     let panel = rango_admin::Admin::new()
         .model::<Message>()

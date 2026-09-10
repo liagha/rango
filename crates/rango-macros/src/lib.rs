@@ -42,23 +42,24 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let (field_type, is_optional) = unpack_option(ty);
         let type_path = type_string(field_type);
 
-        let field_def = if is_key {
-            let key_name = lit_str(ident);
-            quote! { rango::Field::key(#key_name) }
+        let kind = kind_of(&type_path);
+        let name = ident.to_string();
+        let is_id = is_key && name == "id" && kind == Kind::Int;
+
+        let field_def = if is_id {
+            quote! { rango::Field::id() }
+        } else if is_key {
+            quote! { rango::Field::key(#name) }
         } else {
-            let fname = lit_str(ident);
-            let mut def = match type_path.as_str() {
-                "String" | "str" => quote! { rango::Field::new(#fname, rango::Type::Str) },
-                "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
-                    quote! { rango::Field::new(#fname, rango::Type::Int) }
+            let mut def = match kind {
+                Kind::Str | Kind::Other => {
+                    quote! { rango::Field::new(#name, rango::Type::Str) }
                 }
-                "f64" | "f32" => quote! { rango::Field::new(#fname, rango::Type::Float) },
-                "bool" => quote! { rango::Field::new(#fname, rango::Type::Bool) },
-                "DateTime" | "DateTime<Utc>" => {
-                    quote! { rango::Field::new(#fname, rango::Type::DateTime) }
-                }
-                "Decimal" => quote! { rango::Field::new(#fname, rango::Type::Decimal) },
-                _ => quote! { rango::Field::new(#fname, rango::Type::Str) },
+                Kind::Int => quote! { rango::Field::new(#name, rango::Type::Int) },
+                Kind::Float => quote! { rango::Field::new(#name, rango::Type::Float) },
+                Kind::Bool => quote! { rango::Field::new(#name, rango::Type::Bool) },
+                Kind::Date => quote! { rango::Field::new(#name, rango::Type::DateTime) },
+                Kind::Decimal => quote! { rango::Field::new(#name, rango::Type::Decimal) },
             };
             if is_optional {
                 def = quote! { #def.optional() };
@@ -74,8 +75,15 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         let field_idx = syn::Index::from(idx);
 
-        let row_expr = match type_path.as_str() {
-            "String" | "str" => {
+        let row_expr = match kind {
+            Kind::Str => {
+                if is_optional {
+                    quote! { rango::Value::from(&self.#ident) }
+                } else {
+                    quote! { rango::Value::str(&self.#ident) }
+                }
+            }
+            Kind::Other => {
                 if is_optional {
                     quote! {
                         match &self.#ident {
@@ -87,7 +95,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::str(&self.#ident) }
                 }
             }
-            "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
+            Kind::Int => {
                 if is_optional {
                     quote! {
                         match self.#ident {
@@ -99,7 +107,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::int(self.#ident as i64) }
                 }
             }
-            "f64" | "f32" => {
+            Kind::Float => {
                 if is_optional {
                     quote! {
                         match self.#ident {
@@ -111,7 +119,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::float(self.#ident as f64) }
                 }
             }
-            "bool" => {
+            Kind::Bool => {
                 if is_optional {
                     quote! {
                         match self.#ident {
@@ -123,7 +131,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::bool(self.#ident) }
                 }
             }
-            "DateTime" | "DateTime<Utc>" => {
+            Kind::Date => {
                 if is_optional {
                     quote! {
                         match self.#ident {
@@ -135,7 +143,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::datetime(self.#ident) }
                 }
             }
-            "Decimal" => {
+            Kind::Decimal => {
                 if is_optional {
                     quote! {
                         match self.#ident {
@@ -147,38 +155,17 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     quote! { rango::Value::decimal(self.#ident) }
                 }
             }
-            _ => {
-                if is_optional {
-                    quote! {
-                        match &self.#ident {
-                            Some(v) => rango::Value::str(v),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::str(&self.#ident) }
-                }
-            }
         };
 
         let from_expr = if is_key {
-            match type_path.as_str() {
-                "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
-                    quote! { row.int(#field_idx)? as _ }
-                }
+            match kind {
+                Kind::Int => quote! { row.int(#field_idx)? as _ },
                 _ => quote! { row.str(#field_idx)? },
             }
         } else if is_optional {
-            match type_path.as_str() {
-                "String" | "str" => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Str(v)) => Some(v.clone()),
-                            _ => None,
-                        }
-                    }
-                }
-                "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
+            match kind {
+                Kind::Str | Kind::Other => quote! { row.opt_str(#field_idx) },
+                Kind::Int => {
                     quote! {
                         match row.values.get(#field_idx) {
                             Some(rango::Value::Int(v)) => Some(*v as _),
@@ -186,7 +173,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         }
                     }
                 }
-                "f64" | "f32" => {
+                Kind::Float => {
                     quote! {
                         match row.values.get(#field_idx) {
                             Some(rango::Value::Float(v)) => Some(*v as _),
@@ -194,7 +181,23 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         }
                     }
                 }
-                "Decimal" => {
+                Kind::Bool => {
+                    quote! {
+                        match row.values.get(#field_idx) {
+                            Some(rango::Value::Bool(v)) => Some(*v),
+                            _ => None,
+                        }
+                    }
+                }
+                Kind::Date => {
+                    quote! {
+                        match row.values.get(#field_idx) {
+                            Some(rango::Value::DateTime(v)) => Some(*v),
+                            _ => None,
+                        }
+                    }
+                }
+                Kind::Decimal => {
                     quote! {
                         match row.values.get(#field_idx) {
                             Some(rango::Value::Decimal(v)) => Some(*v),
@@ -202,32 +205,21 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         }
                     }
                 }
-                _ => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Str(v)) => Some(v.clone()),
-                            _ => None,
-                        }
-                    }
-                }
             }
         } else {
-            match type_path.as_str() {
-                "String" | "str" => quote! { row.str(#field_idx)? },
-                "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
-                    quote! { row.int(#field_idx)? as _ }
-                }
-                "f64" | "f32" => quote! { row.float(#field_idx)? as _ },
-                "bool" => quote! { row.bool(#field_idx)? },
-                "DateTime" | "DateTime<Utc>" => quote! { row.datetime(#field_idx)? },
-                "Decimal" => quote! { row.decimal(#field_idx)? },
-                _ => quote! { row.str(#field_idx)? },
+            match kind {
+                Kind::Str | Kind::Other => quote! { row.str(#field_idx)? },
+                Kind::Int => quote! { row.int(#field_idx)? as _ },
+                Kind::Float => quote! { row.float(#field_idx)? as _ },
+                Kind::Bool => quote! { row.bool(#field_idx)? },
+                Kind::Date => quote! { row.datetime(#field_idx)? },
+                Kind::Decimal => quote! { row.decimal(#field_idx)? },
             }
         };
 
         if is_key {
-            match type_path.as_str() {
-                "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
+            match kind {
+                Kind::Int => {
                     set_id_stmt = Some(quote! {
                         if let rango::Value::Int(id) = id {
                             self.#ident = id as _;
@@ -247,7 +239,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
 
         field_defs.push(field_def);
-        row_exprs.push(row_expr);
+        if !is_id {
+            row_exprs.push(row_expr);
+        }
         from_fields.push(quote! { #ident: #from_expr });
         idx += 1;
     }
@@ -366,6 +360,25 @@ fn type_string(ty: &syn::Type) -> String {
     }
 }
 
-fn lit_str(ident: &syn::Ident) -> String {
-    ident.to_string()
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Str,
+    Int,
+    Float,
+    Bool,
+    Date,
+    Decimal,
+    Other,
+}
+
+fn kind_of(name: &str) -> Kind {
+    match name {
+        "String" | "str" => Kind::Str,
+        "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => Kind::Int,
+        "f64" | "f32" => Kind::Float,
+        "bool" => Kind::Bool,
+        "DateTime" | "DateTime<Utc>" => Kind::Date,
+        "Decimal" => Kind::Decimal,
+        _ => Kind::Other,
+    }
 }

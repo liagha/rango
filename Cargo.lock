@@ -1289,6 +1289,7 @@ dependencies = [
 name = "rango-cli"
 version = "0.1.0"
 dependencies = [
+ "rango-auth",
  "rango-core",
  "rango-store",
  "rpassword",
