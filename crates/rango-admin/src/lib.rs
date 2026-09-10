@@ -540,7 +540,7 @@ async fn detail<M: AdminModel>(
             inlines.push(Inline {
                 title: other.table.to_string(),
                 rows: items,
-                href: format!("../{}/?{}={}", other.table, field.name, id),
+                href: format!("../../{}/?{}={}", other.table, field.name, id),
             });
         }
     }
