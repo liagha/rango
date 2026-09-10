@@ -131,28 +131,6 @@ async fn log(
     let _ = history.save(&mut entry).await;
 }
 
-pub trait AdminModel: Model {
-    fn columns() -> Vec<&'static str> {
-        Self::fields()
-            .iter()
-            .filter(|field| !matches!(field.kind.flat(), Type::Id | Type::Key))
-            .map(|field| field.name)
-            .collect()
-    }
-
-    fn search() -> Vec<&'static str> {
-        Self::fields()
-            .iter()
-            .filter(|field| matches!(field.kind.flat(), Type::Str))
-            .map(|field| field.name)
-            .collect()
-    }
-
-    fn readonly() -> Vec<&'static str> {
-        Vec::new()
-    }
-}
-
 pub fn history() -> Schema {
     History::schema()
 }
@@ -171,7 +149,7 @@ impl Admin {
         }
     }
 
-    pub fn model<M: AdminModel>(mut self) -> Self {
+    pub fn model<M: Model>(mut self) -> Self {
         self.models.push(M::schema());
         self.routes = self.routes.merge(model_routes::<M>(M::table()));
         self
@@ -188,7 +166,7 @@ impl Default for Admin {
     }
 }
 
-fn model_routes<M: AdminModel>(table: &str) -> Routes {
+fn model_routes<M: Model>(table: &str) -> Routes {
     Routes::new()
         .route(format!("/{table}/"), get(list::<M>))
         .route(
@@ -331,7 +309,7 @@ async fn dashboard(
     render(Dashboard { entries: items })
 }
 
-async fn list<M: AdminModel>(
+async fn list<M: Model>(
     repository: Repository<M>,
     store: Extension<Arc<dyn Store>>,
     models: Extension<Arc<Vec<Schema>>>,
@@ -457,7 +435,7 @@ async fn list<M: AdminModel>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn detail<M: AdminModel>(
+async fn detail<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
     store: Extension<Arc<dyn Store>>,
@@ -555,7 +533,7 @@ async fn detail<M: AdminModel>(
     })
 }
 
-async fn show_new<M: AdminModel>(
+async fn show_new<M: Model>(
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
 ) -> Result<Response, Error> {
@@ -583,7 +561,7 @@ async fn show_new<M: AdminModel>(
     })
 }
 
-async fn create<M: AdminModel>(
+async fn create<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
     current: Current,
@@ -635,7 +613,7 @@ async fn create<M: AdminModel>(
     Ok(view::redirect(&back(&uri, 1)))
 }
 
-async fn show_edit<M: AdminModel>(
+async fn show_edit<M: Model>(
     repository: Repository<M>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
@@ -673,7 +651,7 @@ async fn show_edit<M: AdminModel>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn replace<M: AdminModel>(
+async fn replace<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
     current: Current,
@@ -735,7 +713,7 @@ async fn replace<M: AdminModel>(
     Ok(view::redirect(&back(&uri, 1)))
 }
 
-async fn remove<M: AdminModel>(
+async fn remove<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
     current: Current,
@@ -752,4 +730,67 @@ async fn remove<M: AdminModel>(
     )
     .await;
     Ok(view::redirect(&back(&uri, 2)))
+}
+
+#[macro_export]
+macro_rules! manage {
+    ($schema:expr, $db:expr) => {
+        fn main() {
+            let db = $db;
+            let mut args = std::env::args().skip(1).peekable();
+            match args.peek().map(String::as_str) {
+                None | Some("-h") | Some("--help") => {
+                    println!("{}", rango_cli::usage());
+                    return;
+                }
+                _ => {}
+            }
+            let command = rango_cli::parse(args).unwrap_or_else(|fail| {
+                eprintln!("{fail}");
+                std::process::exit(2);
+            });
+            rango::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let store = rango::store::sqlite::open(db).await.unwrap();
+                    match command {
+                        rango_cli::Command::Migrate { drop } => {
+                            match rango_cli::migrate(&store, &$schema, drop).await {
+                                Ok(count) => println!("migrated {count}"),
+                                Err(fail) => {
+                                    eprintln!("migrate failed: {fail}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        rango_cli::Command::Create(rango_cli::Create::User {
+                            username,
+                            password,
+                            superuser,
+                        }) => {
+                            let username = username
+                                .unwrap_or_else(|| rango_cli::prompt("Username: "));
+                            let password =
+                                password.unwrap_or_else(rango_cli::prompt_password);
+                            match rango_auth::User::register(
+                                store.clone(),
+                                &username,
+                                &password,
+                                superuser,
+                            )
+                            .await
+                            {
+                                Ok(user) => println!("created user {}", user.username),
+                                Err(fail) => {
+                                    eprintln!("error: {fail}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
+                });
+        }
+    };
 }

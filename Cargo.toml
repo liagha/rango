@@ -5,6 +5,7 @@ members = [
     "crates/rango-auth",
     "crates/rango-cli",
     "crates/rango-core",
+    "crates/rango-macros",
     "crates/rango-store",
     "examples/helloworld",
 ]
@@ -19,6 +20,7 @@ rango-admin = { path = "crates/rango-admin", version = "0.1.0" }
 rango-auth = { path = "crates/rango-auth", version = "0.1.0" }
 rango-cli = { path = "crates/rango-cli", version = "0.1.0" }
 rango-core = { path = "crates/rango-core", version = "0.1.0" }
+rango-macros = { path = "crates/rango-macros", version = "0.1.0" }
 rango-store = { path = "crates/rango-store", version = "0.1.0", default-features = false }
 
 axum = { version = "0.8.9", features = ["form"] }

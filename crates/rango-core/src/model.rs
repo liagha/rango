@@ -97,6 +97,26 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn set_id(&mut self, id: Value);
     fn id(&self) -> Value;
 
+    fn columns() -> Vec<&'static str> {
+        Self::fields()
+            .iter()
+            .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key))
+            .map(|f| f.name)
+            .collect()
+    }
+
+    fn search() -> Vec<&'static str> {
+        Self::fields()
+            .iter()
+            .filter(|f| matches!(f.kind.flat(), Type::Str))
+            .map(|f| f.name)
+            .collect()
+    }
+
+    fn readonly() -> Vec<&'static str> {
+        Vec::new()
+    }
+
     fn ddl() -> String {
         Self::schema().ddl()
     }

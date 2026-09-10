@@ -30,3 +30,4 @@ pub use tokio;
 
 pub use askama::Template;
 pub use axum::routing::{get, post};
+pub use rango_macros::Model;

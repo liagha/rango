@@ -1301,6 +1301,7 @@ dependencies = [
  "askama",
  "axum",
  "chrono",
+ "rango-macros",
  "rango-store",
  "rust_decimal",
  "serde",
@@ -1311,6 +1312,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "rango-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
