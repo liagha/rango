@@ -1,7 +1,7 @@
 use rango::{
     Repository, Row, StoreError, Value,
     chrono::{DateTime, Utc},
-    model::{Field, Model, Type},
+    model::{Field, Model, Table, Type},
 };
 use rango_auth::Current;
 
@@ -18,8 +18,8 @@ pub(crate) struct History {
 }
 
 impl Model for History {
-    fn table() -> &'static str {
-        "history"
+    fn table() -> Table {
+        Table("history")
     }
 
     fn fields() -> Vec<Field> {
@@ -29,7 +29,7 @@ impl Model for History {
             Field::new("row", Type::Str),
             Field::new("action", Type::Str),
             Field::new("user", Type::Str),
-            Field::new("at", Type::DateTime),
+            Field::new("at", Type::Moment),
         ]
     }
 
@@ -93,7 +93,7 @@ impl Action {
 
 pub(crate) async fn log(
     history: &Repository<History>,
-    table: &'static str,
+    table: Table,
     row: &Value,
     action: Action,
     current: &Current,

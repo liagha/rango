@@ -1,6 +1,6 @@
 use rango::{
     chrono::{DateTime, Utc},
-    model::{Field, Model, Type},
+    model::{Field, Model, Name, Type},
     store::Value,
 };
 
@@ -37,7 +37,7 @@ pub(crate) fn id_of(values: &[Value], fields: &[Field]) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn locate(names: &[&'static str], fields: &[Field]) -> Vec<usize> {
+pub(crate) fn locate(names: &[Name], fields: &[Field]) -> Vec<usize> {
     let mut out = Vec::new();
     for name in names {
         if let Some(i) = fields

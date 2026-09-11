@@ -8,7 +8,7 @@ use axum::{
 use rango::{
     Error, Repository, Response, Row, Store, Value,
     forgery::{Token, cookie},
-    model::{Field, Model, Schema, Type, key},
+    model::{Field, Model, Schema, Table, Type, key},
     store::ColumnKind,
     view::{self, render},
 };
@@ -34,7 +34,7 @@ struct Entry {
 #[derive(Template)]
 #[template(path = "list.html")]
 struct List {
-    title: &'static str,
+    title: Table,
     q: String,
     sort: String,
     query: String,
@@ -63,7 +63,7 @@ struct Item {
 #[template(path = "form.html")]
 struct FormView {
     title: String,
-    model: &'static str,
+    model: Table,
     home: &'static str,
     up: &'static str,
     sub: String,
@@ -75,7 +75,7 @@ struct FormView {
 #[derive(Template)]
 #[template(path = "detail.html")]
 struct Detail {
-    title: &'static str,
+    title: Table,
     id: String,
     pairs: Vec<Pair>,
     past: Vec<Log>,
@@ -223,7 +223,7 @@ pub(crate) async fn list<M: Model>(
         .iter()
         .map(|&i| {
             let name = fields[i].name;
-            let (marker, toggle) = if sort == name {
+            let (marker, toggle) = if sort == name.as_str() {
                 ("▲", format!("-{name}"))
             } else if sort == format!("-{name}") {
                 ("▼", name.to_string())
@@ -250,7 +250,7 @@ pub(crate) async fn list<M: Model>(
         .map(|field| {
             filter_input(
                 field,
-                params.get(field.name).map(String::as_str).unwrap_or(""),
+                params.get(field.name.as_str()).map(String::as_str).unwrap_or(""),
             )
         })
         .collect();
@@ -300,7 +300,7 @@ pub(crate) async fn detail<M: Model>(
     let mut events = Vec::new();
     if let Ok(all) = history.all().await {
         for event in all {
-            if event.model == M::table() && event.row == id {
+            if event.model.as_str() == M::table().as_str() && event.row == id {
                 events.push(event);
             }
         }
@@ -423,9 +423,9 @@ pub(crate) async fn create<M: Model>(
             values.push(field.default.clone().unwrap_or(Value::Null));
             continue;
         }
-        let raw = map.get(field.name).map(String::as_str).unwrap_or("");
+        let raw = map.get(field.name.as_str()).map(String::as_str).unwrap_or("");
         inputs.push(input_raw(field, raw));
-        match value(field, map.get(field.name)) {
+        match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
             Err(fail) => {
                 problems.push(fail.to_string());
@@ -447,7 +447,14 @@ pub(crate) async fn create<M: Model>(
     }
     let mut model = M::from_row(&Row { values })?;
     repository.save(&mut model).await?;
-    log(&history, M::table(), &model.id(), Action::Create, &current).await;
+    log(
+        &history,
+        M::table(),
+        &model.id(),
+        Action::Create,
+        &current,
+    )
+    .await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -523,9 +530,9 @@ pub(crate) async fn replace<M: Model>(
             values.push(old.cloned().unwrap_or(Value::Null));
             continue;
         }
-        let raw = map.get(field.name).map(String::as_str).unwrap_or("");
+        let raw = map.get(field.name.as_str()).map(String::as_str).unwrap_or("");
         inputs.push(input_raw(field, raw));
-        match value(field, map.get(field.name)) {
+        match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
             Err(fail) => {
                 problems.push(fail.to_string());
@@ -547,7 +554,14 @@ pub(crate) async fn replace<M: Model>(
     }
     let model = M::from_row(&Row { values })?;
     repository.update(&model).await?;
-    log(&history, M::table(), &key::<M>(&id), Action::Edit, &current).await;
+    log(
+        &history,
+        M::table(),
+        &key::<M>(&id),
+        Action::Edit,
+        &current,
+    )
+    .await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 

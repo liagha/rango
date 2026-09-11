@@ -17,7 +17,10 @@ pub use error::Error;
 #[cfg(feature = "forgery")]
 pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
-pub use model::{Field, Model, Repository, Schema, Type, id_column, key};
+pub use model::{
+    Check, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Pick, Query,
+    Repository, Rule, Schema, Sort, Table, Tree, Type, id_column, key,
+};
 pub use settings::Settings;
 pub use urls::Routes;
 pub use view::{Request, Response, View, get_view, html, redirect, render};

@@ -57,7 +57,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 Kind::Int => quote! { rango::Field::new(#name, rango::Type::Int) },
                 Kind::Float => quote! { rango::Field::new(#name, rango::Type::Float) },
                 Kind::Bool => quote! { rango::Field::new(#name, rango::Type::Bool) },
-                Kind::Date => quote! { rango::Field::new(#name, rango::Type::DateTime) },
+                Kind::Date => quote! { rango::Field::new(#name, rango::Type::Moment) },
                 Kind::Decimal => quote! { rango::Field::new(#name, rango::Type::Decimal) },
             };
             if is_optional {
@@ -249,8 +249,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     Ok(quote! {
         impl rango::Model for #name {
-            fn table() -> &'static str {
-                #table
+            fn table() -> rango::Table {
+                rango::Table(#table)
             }
 
             fn fields() -> Vec<rango::Field> {

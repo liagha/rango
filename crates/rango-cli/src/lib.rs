@@ -122,7 +122,7 @@ pub async fn migrate(
     for schema in schemas {
         store.execute(&schema.ddl(), &[]).await?;
         done += 1;
-        match store.columns(schema.table).await {
+        match store.columns(schema.table.as_str()).await {
             Ok(have) => {
                 for sql in schema.rename(&have) {
                     store.execute(&sql, &[]).await?;

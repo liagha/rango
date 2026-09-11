@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
 };
 use rango::{
-    model::{Model, Schema},
+    model::{Model, Schema, Table},
     urls::Routes,
 };
 
@@ -53,7 +53,7 @@ impl Default for Admin {
     }
 }
 
-fn model_routes<M: Model>(table: &str) -> Routes {
+fn model_routes<M: Model>(table: Table) -> Routes {
     Routes::new()
         .route(format!("/{table}/"), get(list::<M>))
         .route(

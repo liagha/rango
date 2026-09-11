@@ -7,6 +7,36 @@ use crate::{
     store::{Column, ColumnKind, Row, Store, StoreError, Value},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Table(pub &'static str);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Name(pub &'static str);
+
+impl Table {
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl Name {
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Table {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub enum Type {
     Id,
@@ -15,45 +45,171 @@ pub enum Type {
     Int,
     Float,
     Bool,
-    DateTime,
+    Moment,
     Decimal,
-    Optional(Box<Type>),
+    Ref,
+    Many,
+    Opt(Box<Type>),
 }
 
 impl Type {
     pub fn optional(self) -> Type {
-        Type::Optional(Box::new(self))
+        Type::Opt(Box::new(self))
     }
 
     pub fn is_optional(&self) -> bool {
-        matches!(self, &Type::Optional(_))
+        matches!(self, &Type::Opt(_))
     }
 
     pub fn flat(&self) -> &Type {
         match self {
-            Type::Optional(inner) => inner.flat(),
+            Type::Opt(inner) => inner.flat(),
             kind => kind,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub options: &'static [(&'static str, &'static str)],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check(pub &'static str);
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Link {
+    To(Table, Name),
+    Via(Table, Name, Name),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Rule {
+    Same(Vec<Name>),
+    Hold(Name),
+    Said(Check),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    Eq,
+    Ne,
+    More,
+    Less,
+    At,
+    In,
+    Out,
+    Like,
+    Bare,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Filter {
+    pub field: Name,
+    pub op: Op,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tree {
+    Leaf(Filter),
+    And(Vec<Tree>),
+    Or(Vec<Tree>),
+    Cut(Box<Tree>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sort {
+    pub field: Name,
+    pub order: Order,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Page {
+    pub count: usize,
+    pub offset: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Only {
+    All,
+    Some(Vec<Name>),
+    Lone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mass {
+    Count,
+    Sum(Name),
+    Mean(Name),
+    Low(Name),
+    High(Name),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Query {
+    pub tree: Tree,
+    pub sort: Vec<Sort>,
+    pub page: Page,
+    pub only: Only,
+    pub mass: Option<Mass>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Key {
+    Int(i64),
+    Text(String),
+}
+
+impl Key {
+    pub fn parse(raw: &str, schema: &Schema) -> Self {
+        let keyed = schema.fields.iter().any(|field| {
+            matches!(field.kind.flat(), Type::Key) && field.name == schema.key()
+        });
+        if keyed {
+            return Key::Text(raw.into());
+        }
+        match raw.parse::<i64>() {
+            Ok(id) => Key::Int(id),
+            Err(_) => Key::Text(raw.into()),
+        }
+    }
+
+    pub fn value(&self) -> Value {
+        match self {
+            Key::Int(id) => Value::int(*id),
+            Key::Text(text) => Value::str(text),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Field {
-    pub name: &'static str,
+    pub name: Name,
     pub kind: Type,
     pub unique: bool,
+    pub index: bool,
+    pub pick: Option<Pick>,
     pub default: Option<Value>,
-    pub references: Option<&'static str>,
+    pub link: Option<Link>,
 }
 
 impl Field {
     pub fn new(name: &'static str, kind: Type) -> Self {
         Self {
-            name,
+            name: Name(name),
             kind,
             unique: false,
+            index: false,
+            pick: None,
             default: None,
-            references: None,
+            link: None,
         }
     }
 
@@ -70,34 +226,48 @@ impl Field {
         self
     }
 
+    pub fn indexed(mut self) -> Self {
+        self.index = true;
+        self
+    }
+
     pub fn default(mut self, default: Value) -> Self {
         self.default = Some(default);
         self
     }
 
-    pub fn references(mut self, table: &'static str) -> Self {
-        self.references = Some(table);
+    pub fn references(mut self, target: &'static str) -> Self {
+        let (table, column) = match target.split_once('.') {
+            Some((table, column)) => (table, column),
+            None => (target, "id"),
+        };
+        self.link = Some(Link::To(Table(table), Name(column)));
         self
     }
 
-    pub fn reference(&self) -> Option<(&'static str, &'static str)> {
-        let target = self.references?;
-        match target.split_once('.') {
-            Some((table, column)) => Some((table, column)),
-            None => Some((target, "id")),
+    pub fn link(mut self, link: Link) -> Self {
+        self.link = Some(link);
+        self
+    }
+
+    pub fn reference(&self) -> Option<(Table, Name)> {
+        match self.link {
+            Some(Link::To(table, name)) => Some((table, name)),
+            Some(Link::Via(..)) => todo!("phase 3"),
+            None => None,
         }
     }
 }
 
 pub trait Model: Clone + Send + Sync + 'static {
-    fn table() -> &'static str;
+    fn table() -> Table;
     fn fields() -> Vec<Field>;
     fn row(&self) -> Vec<Value>;
     fn from_row(row: &Row) -> Result<Self, StoreError>;
     fn set_id(&mut self, id: Value);
     fn id(&self) -> Value;
 
-    fn columns() -> Vec<&'static str> {
+    fn columns() -> Vec<Name> {
         Self::fields()
             .iter()
             .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key))
@@ -105,7 +275,7 @@ pub trait Model: Clone + Send + Sync + 'static {
             .collect()
     }
 
-    fn search() -> Vec<&'static str> {
+    fn search() -> Vec<Name> {
         Self::fields()
             .iter()
             .filter(|f| matches!(f.kind.flat(), Type::Str))
@@ -113,7 +283,7 @@ pub trait Model: Clone + Send + Sync + 'static {
             .collect()
     }
 
-    fn readonly() -> Vec<&'static str> {
+    fn readonly() -> Vec<Name> {
         Vec::new()
     }
 
@@ -125,22 +295,28 @@ pub trait Model: Clone + Send + Sync + 'static {
         Schema {
             table: Self::table(),
             fields: Self::fields(),
+            rules: Vec::new(),
         }
+    }
+
+    fn spec() -> Schema {
+        Self::schema()
     }
 }
 
 pub struct Schema {
-    pub table: &'static str,
+    pub table: Table,
     pub fields: Vec<Field>,
+    pub rules: Vec<Rule>,
 }
 
 impl Schema {
-    pub fn key(&self) -> &'static str {
+    pub fn key(&self) -> Name {
         self.fields
             .iter()
             .find(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
             .map(|field| field.name)
-            .unwrap_or("id")
+            .unwrap_or(Name("id"))
     }
 
     pub fn kinds(&self) -> Vec<ColumnKind> {
@@ -166,8 +342,8 @@ impl Schema {
             if field.kind == Type::Id {
                 continue;
             }
-            if !have.iter().any(|col| col.name == field.name)
-                && !moved.iter().any(|(_, name)| name == field.name)
+            if !have.iter().any(|col| col.name == field.name.as_str())
+                && !moved.iter().any(|(_, name)| name == field.name.as_str())
             {
                 out.push(format!(
                     "ALTER TABLE \"{}\" ADD COLUMN {}",
@@ -186,7 +362,10 @@ impl Schema {
             if col.name == "id" {
                 continue;
             }
-            if !self.fields.iter().any(|field| field.name == col.name)
+            if !self
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == col.name.as_str())
                 && !moved.iter().any(|(name, _)| name == &col.name)
             {
                 out.push(format!(
@@ -218,7 +397,10 @@ impl Schema {
                 .filter(|col| {
                     col.name != "id"
                         && col.kind == kind
-                        && !self.fields.iter().any(|field| field.name == col.name)
+                        && !self
+                            .fields
+                            .iter()
+                            .any(|field| field.name.as_str() == col.name.as_str())
                 })
                 .map(|col| &col.name)
                 .collect();
@@ -228,7 +410,7 @@ impl Schema {
                 .filter(|field| {
                     field.kind != Type::Id
                         && affinity(&field.kind) == kind
-                        && !have.iter().any(|col| col.name == field.name)
+                        && !have.iter().any(|col| col.name == field.name.as_str())
                 })
                 .collect();
             if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
@@ -241,10 +423,12 @@ impl Schema {
 
 fn affinity(kind: &Type) -> ColumnKind {
     match kind {
-        Type::Id | Type::Int | Type::DateTime | Type::Bool => ColumnKind::Integer,
+        Type::Id | Type::Int | Type::Moment | Type::Bool => ColumnKind::Integer,
         Type::Float => ColumnKind::Real,
         Type::Str | Type::Key | Type::Decimal => ColumnKind::Text,
-        Type::Optional(inner) => affinity(inner),
+        Type::Ref => todo!("phase 2"),
+        Type::Many => todo!("phase 3"),
+        Type::Opt(inner) => affinity(inner),
     }
 }
 
@@ -252,21 +436,39 @@ pub(crate) fn kinds<M: Model>() -> Vec<ColumnKind> {
     M::schema().kinds()
 }
 
-pub fn id_column<M: Model>() -> &'static str {
+pub fn id_column<M: Model>() -> Name {
     M::schema().key()
 }
 
+impl Sort {
+    pub fn parse(raw: &str, schema: &Schema) -> Self {
+        let (name, order) = match raw.strip_prefix('-') {
+            Some(name) => (name, Order::Desc),
+            None => (raw, Order::Asc),
+        };
+        let known = schema
+            .fields
+            .iter()
+            .any(|field| field.name.as_str() == name);
+        if known {
+            for field in &schema.fields {
+                if field.name.as_str() == name {
+                    return Sort {
+                        field: field.name,
+                        order,
+                    };
+                }
+            }
+        }
+        Sort {
+            field: schema.key(),
+            order: Order::Asc,
+        }
+    }
+}
+
 pub fn key<M: Model>(raw: &str) -> Value {
-    let keyed = M::fields()
-        .iter()
-        .any(|field| matches!(field.kind.flat(), Type::Key) && field.name == id_column::<M>());
-    if keyed {
-        return Value::str(raw);
-    }
-    match raw.parse::<i64>() {
-        Ok(id) => Value::int(id),
-        Err(_) => Value::str(raw),
-    }
+    Key::parse(raw, &M::schema()).value()
 }
 
 fn order<M: Model>(sort: &str) -> String {
@@ -274,8 +476,14 @@ fn order<M: Model>(sort: &str) -> String {
         Some(name) => (name, true),
         None => (sort, false),
     };
-    let known = M::fields().iter().any(|field| field.name == name);
-    let name = if known { name } else { id_column::<M>() };
+    let known = M::fields()
+        .iter()
+        .any(|field| field.name.as_str() == name);
+    let name = if known {
+        name
+    } else {
+        id_column::<M>().as_str()
+    };
     if down {
         format!("\"{name}\" DESC")
     } else {
@@ -306,11 +514,13 @@ fn sql(kind: &Type) -> &'static str {
         Type::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
         Type::Key => "TEXT PRIMARY KEY",
         Type::Str => "TEXT",
-        Type::Int | Type::DateTime => "INTEGER",
+        Type::Int | Type::Moment => "INTEGER",
         Type::Float => "REAL",
         Type::Bool => "INTEGER",
         Type::Decimal => "TEXT",
-        Type::Optional(inner) => sql(inner),
+        Type::Ref => todo!("phase 2"),
+        Type::Many => todo!("phase 3"),
+        Type::Opt(inner) => sql(inner),
     }
 }
 
@@ -338,7 +548,7 @@ pub struct Repository<M = ()> {
     marker: PhantomData<M>,
 }
 
-fn pairs<M: Model>(model: &M) -> Vec<(&'static str, Value)> {
+fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
     let mut values = model.row().into_iter();
     M::fields()
         .into_iter()
@@ -406,7 +616,10 @@ impl<M: Model> Repository<M> {
                 .map(|pair| pair.0.to_string())
                 .collect::<Vec<_>>();
             let params = found.into_iter().map(|pair| pair.1).collect::<Vec<_>>();
-            let id = self.store.insert(M::table(), &columns, &params).await?;
+            let id = self
+                .store
+                .insert(M::table().as_str(), &columns, &params)
+                .await?;
             model.set_id(Value::int(id));
         }
         Ok(())
@@ -440,7 +653,7 @@ impl<M: Model> Repository<M> {
         rows.iter().map(|row| M::from_row(row)).collect()
     }
 
-    pub async fn filter(&self, field: &str, value: &Value) -> Result<Vec<M>, StoreError> {
+    pub async fn filter(&self, field: Name, value: &Value) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
         let sql = format!(
             "SELECT * FROM \"{}\" WHERE \"{field}\" = ? ORDER BY \"{}\"",
@@ -454,14 +667,13 @@ impl<M: Model> Repository<M> {
         rows.iter().map(|row| M::from_row(row)).collect()
     }
 
-    pub async fn ordered(&self, field: &str, down: bool) -> Result<Vec<M>, StoreError> {
+    pub async fn ordered(&self, sort: Sort) -> Result<Vec<M>, StoreError> {
         self.ensure().await?;
-        let sort = if down {
-            format!("-{field}")
-        } else {
-            field.to_string()
+        let text = match sort.order {
+            Order::Asc => sort.field.to_string(),
+            Order::Desc => format!("-{}", sort.field),
         };
-        self.scan("", &[], &sort, None).await
+        self.scan("", &[], &text, None).await
     }
 
     pub async fn scan(
@@ -555,8 +767,8 @@ mod tests {
     }
 
     impl Model for Post {
-        fn table() -> &'static str {
-            "posts"
+        fn table() -> Table {
+            Table("posts")
         }
 
         fn fields() -> Vec<Field> {
@@ -607,8 +819,8 @@ mod tests {
     }
 
     impl Model for Product {
-        fn table() -> &'static str {
-            "products"
+        fn table() -> Table {
+            Table("products")
         }
 
         fn fields() -> Vec<Field> {
@@ -694,5 +906,55 @@ mod tests {
     #[test]
     fn affinities() {
         assert_eq!(kinds::<Post>(), vec![ColumnKind::Integer, ColumnKind::Text]);
+    }
+
+    #[test]
+    fn spec() {
+        let spec = Post::spec();
+        assert_eq!(spec.table, Table("posts"));
+        assert_eq!(spec.rules, Vec::new());
+        assert_eq!(Post::spec().key(), Name("id"));
+        assert_eq!(Product::spec().key(), Name("sku"));
+        assert_eq!(Post::columns(), vec![Name("title")]);
+        assert_eq!(Post::search(), vec![Name("title")]);
+    }
+
+    #[test]
+    fn sorts() {
+        let schema = Post::spec();
+        assert_eq!(
+            Sort::parse("title", &schema),
+            Sort {
+                field: Name("title"),
+                order: Order::Asc,
+            }
+        );
+        assert_eq!(
+            Sort::parse("-title", &schema),
+            Sort {
+                field: Name("title"),
+                order: Order::Desc,
+            }
+        );
+        assert_eq!(
+            Sort::parse("junk", &schema),
+            Sort {
+                field: Name("id"),
+                order: Order::Asc,
+            }
+        );
+    }
+
+    #[test]
+    fn keys() {
+        assert_eq!(Key::parse("7", &Post::spec()).value(), Value::int(7));
+        assert_eq!(
+            Key::parse("7", &Product::spec()).value(),
+            Value::str("7")
+        );
+        assert_eq!(
+            Key::parse("x", &Post::spec()).value(),
+            Value::str("x")
+        );
     }
 }

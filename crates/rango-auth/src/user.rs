@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rango::{
     Error, Repository, Row, Store, StoreError, Value,
     chrono::{DateTime, Utc},
-    model::{Field, Model, Type},
+    model::{Field, Model, Name, Table, Type},
 };
 
 #[derive(Clone)]
@@ -16,8 +16,8 @@ pub struct User {
 }
 
 impl Model for User {
-    fn table() -> &'static str {
-        "users"
+    fn table() -> Table {
+        Table("users")
     }
 
     fn fields() -> Vec<Field> {
@@ -25,7 +25,7 @@ impl Model for User {
             Field::id(),
             Field::new("username", Type::Str).unique(),
             Field::new("password", Type::Str),
-            Field::new("created", Type::DateTime),
+            Field::new("created", Type::Moment),
             Field::new("superuser", Type::Bool).default(Value::Bool(false)),
         ]
     }
@@ -100,7 +100,7 @@ impl User {
         password: &str,
     ) -> Result<Option<User>, Error> {
         let users = Repository::<User>::new(store)
-            .filter("username", &Value::str(username))
+            .filter(Name("username"), &Value::str(username))
             .await?;
         for user in users {
             if bcrypt::verify(password, &user.password).unwrap_or(false) {

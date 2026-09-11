@@ -19,7 +19,10 @@ pub(crate) fn cond(
         if field.kind == Type::Id {
             continue;
         }
-        let raw = params.get(field.name).map(String::as_str).unwrap_or("");
+        let raw = params
+            .get(field.name.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
         if raw.is_empty() {
             continue;
         }
@@ -53,7 +56,7 @@ pub(crate) fn cond(
                 parts.push(format!("\"{}\" = ?", field.name));
                 values.push(Value::bool(matches!(raw, "1" | "true" | "on" | "yes")));
             }
-            Type::DateTime => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+            Type::Moment => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
                 Ok(day) => {
                     let start = day.and_time(NaiveTime::MIN).and_utc();
                     let end = day
