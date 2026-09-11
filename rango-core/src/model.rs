@@ -1,0 +1,475 @@
+use std::{marker::PhantomData, sync::Arc};
+
+use axum::{extract::FromRequestParts, http::request::Parts};
+
+use crate::{
+    error::Error,
+    store::{Row, Store, StoreError, Value},
+};
+
+pub use crate::store::{
+    Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
+    Run, Schema, Sort, Table, Tree, Type, many,
+};
+
+pub trait Model: Clone + Send + Sync + 'static {
+    fn table() -> Table;
+    fn fields() -> Vec<Field>;
+    fn row(&self) -> Vec<Value>;
+    fn from_row(row: &Row) -> Result<Self, StoreError>;
+    fn set_id(&mut self, id: Value);
+    fn id(&self) -> Value;
+
+    fn columns() -> Vec<Name> {
+        Self::fields()
+            .iter()
+            .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key) && !many(&f.kind))
+            .map(|f| f.name)
+            .collect()
+    }
+
+    fn search() -> Vec<Name> {
+        Self::fields()
+            .iter()
+            .filter(|f| matches!(f.kind.flat(), Type::Str))
+            .map(|f| f.name)
+            .collect()
+    }
+
+    fn readonly() -> Vec<Name> {
+        Vec::new()
+    }
+
+    fn actions() -> Vec<Action> {
+        vec![Action::wipe()]
+    }
+
+    fn schema() -> Schema {
+        Schema {
+            table: Self::table(),
+            fields: Self::fields(),
+            rules: Vec::new(),
+        }
+    }
+
+    fn spec() -> Schema {
+        Self::schema()
+    }
+}
+
+pub fn id_column<M: Model>() -> Name {
+    M::schema().key()
+}
+
+pub fn key<M: Model>(raw: &str) -> Value {
+    Key::parse(raw, &M::schema()).value()
+}
+
+pub async fn related<M: Model>(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    model: &M,
+    field: Name,
+) -> Result<Vec<Row>, StoreError> {
+    let bad = |msg: &str| StoreError::Value(msg.into());
+    let here = M::schema();
+    let many = here
+        .fields
+        .iter()
+        .find(|entry| entry.name == field)
+        .ok_or_else(|| bad("unknown field"))?;
+    if !crate::store::many(&many.kind) {
+        return Err(StoreError::Unsupported("single field needs filter".into()));
+    }
+    let (through_table, mine, theirs) = match &many.link {
+        Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
+        _ => return Err(bad("many field needs via")),
+    };
+    let through = schemas
+        .iter()
+        .find(|spec| spec.table == through_table)
+        .ok_or_else(|| bad("unknown through"))?;
+    let their = through
+        .fields
+        .iter()
+        .find(|entry| entry.name == theirs)
+        .ok_or_else(|| bad("unknown through column"))?;
+    let (target_table, target_col) = match &their.link {
+        Some(Link::To(table, name)) => (*table, *name),
+        _ => return Err(bad("through column needs references")),
+    };
+    let target = schemas
+        .iter()
+        .find(|spec| spec.table == target_table)
+        .ok_or_else(|| bad("unknown target"))?;
+    store.define(through).await?;
+    store.define(target).await?;
+    let links = store
+        .scan_query(
+            through,
+            &Query {
+                tree: Tree::Leaf(Filter {
+                    field: mine,
+                    op: Op::Eq,
+                    value: model.id(),
+                }),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![theirs]),
+                mass: None,
+            },
+        )
+        .await?;
+    let mut ids = Vec::new();
+    for row in &links {
+        if let Some(id) = row.get(0)
+            && *id != Value::Null
+            && !ids.contains(id)
+        {
+            ids.push(id.clone());
+        }
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let leaves = ids
+        .into_iter()
+        .map(|id| {
+            Tree::Leaf(Filter {
+                field: target_col,
+                op: Op::Eq,
+                value: id,
+            })
+        })
+        .collect();
+    store
+        .scan_query(
+            target,
+            &Query {
+                tree: Tree::Or(leaves),
+                sort: vec![Sort {
+                    field: target.key(),
+                    order: Order::Asc,
+                }],
+                page: Page::all(),
+                only: Only::All,
+                mass: None,
+            },
+        )
+        .await
+}
+
+pub struct Repository<M = ()> {
+    store: Arc<dyn Store>,
+    marker: PhantomData<M>,
+}
+
+fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
+    let mut values = model.row().into_iter();
+    M::fields()
+        .into_iter()
+        .filter(|field| field.kind != Type::Id && !many(&field.kind))
+        .map(|field| {
+            let value = values.next().unwrap_or(Value::Null);
+            let value = match field.default {
+                Some(ref default) if value == Value::Null => default.clone(),
+                _ => value,
+            };
+            (field.name, value)
+        })
+        .collect()
+}
+
+impl<M: Model> Repository<M> {
+    pub fn new(store: Arc<dyn Store>) -> Self {
+        Self {
+            store,
+            marker: PhantomData,
+        }
+    }
+
+    async fn ensure(&self) -> Result<(), StoreError> {
+        self.store.define(&M::schema()).await
+    }
+
+    pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
+        self.save_many(std::slice::from_mut(model)).await
+    }
+
+    pub async fn save_many(&self, models: &mut [M]) -> Result<(), StoreError> {
+        if models.is_empty() {
+            return Ok(());
+        }
+        self.ensure().await?;
+        let batch = models.iter().map(pairs).collect::<Vec<_>>();
+        let keys = self.store.create(&M::schema(), &batch).await?;
+        for (model, key) in models.iter_mut().zip(keys) {
+            model.set_id(key.value());
+        }
+        Ok(())
+    }
+
+    pub async fn get(&self, id: &Value) -> Result<Option<M>, StoreError> {
+        let schema = M::schema();
+        let mut rows = self
+            .scan_query(&Query {
+                tree: Tree::Leaf(Filter {
+                    field: schema.key(),
+                    op: Op::Eq,
+                    value: id.clone(),
+                }),
+                sort: vec![Sort {
+                    field: schema.key(),
+                    order: Order::Asc,
+                }],
+                page: Page::all(),
+                only: Only::Lone,
+                mass: None,
+            })
+            .await?;
+        Ok(rows.pop())
+    }
+
+    pub async fn all(&self) -> Result<Vec<M>, StoreError> {
+        let schema = M::schema();
+        self.scan_query(&Query {
+            tree: Tree::And(Vec::new()),
+            sort: vec![Sort {
+                field: schema.key(),
+                order: Order::Asc,
+            }],
+            page: Page::all(),
+            only: Only::All,
+            mass: None,
+        })
+        .await
+    }
+
+    pub async fn filter(&self, field: Name, value: &Value) -> Result<Vec<M>, StoreError> {
+        let schema = M::schema();
+        self.scan_query(&Query {
+            tree: Tree::Leaf(Filter {
+                field,
+                op: Op::Eq,
+                value: value.clone(),
+            }),
+            sort: vec![Sort {
+                field: schema.key(),
+                order: Order::Asc,
+            }],
+            page: Page::all(),
+            only: Only::All,
+            mass: None,
+        })
+        .await
+    }
+
+    pub async fn ordered(&self, sort: Sort) -> Result<Vec<M>, StoreError> {
+        self.scan_query(&Query {
+            tree: Tree::And(Vec::new()),
+            sort: vec![sort],
+            page: Page::all(),
+            only: Only::All,
+            mass: None,
+        })
+        .await
+    }
+
+    pub async fn scan_query(&self, query: &Query) -> Result<Vec<M>, StoreError> {
+        if matches!(query.only, Only::Some(_)) {
+            return Err(StoreError::Unsupported("projected rows need rows()".into()));
+        }
+        let rows = self.rows(query).await?;
+        rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn rows(&self, query: &Query) -> Result<Vec<Row>, StoreError> {
+        self.ensure().await?;
+        self.store.scan_query(&M::schema(), query).await
+    }
+
+    pub async fn total_query(&self, query: &Query) -> Result<usize, StoreError> {
+        self.ensure().await?;
+        self.store.total_query(&M::schema(), query).await
+    }
+
+    pub async fn mass(&self, query: &Query) -> Result<Value, StoreError> {
+        self.ensure().await?;
+        self.store.mass(&M::schema(), query).await
+    }
+
+    pub async fn update(&self, model: &M) -> Result<(), StoreError> {
+        self.ensure().await?;
+        self.store
+            .replace(&M::schema(), &Key::of(&model.id())?, &pairs(model))
+            .await
+    }
+
+    pub async fn delete(&self, id: &Value) -> Result<(), StoreError> {
+        self.ensure().await?;
+        self.store.remove(&M::schema(), &Key::of(id)?).await
+    }
+}
+
+impl<M: Model> FromRequestParts<()> for Repository<M> {
+    type Rejection = Error;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &()) -> Result<Self, Self::Rejection> {
+        let store = parts
+            .extensions
+            .get::<Arc<dyn Store>>()
+            .cloned()
+            .ok_or_else(|| Error::Server("no store configured".into()))?;
+        Ok(Self::new(store))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Post {
+        id: i64,
+        title: String,
+    }
+
+    impl Model for Post {
+        fn table() -> Table {
+            Table("posts")
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![Field::id(), Field::new("title", Type::Str)]
+        }
+
+        fn row(&self) -> Vec<Value> {
+            vec![Value::str(&self.title)]
+        }
+
+        fn from_row(row: &Row) -> Result<Self, StoreError> {
+            Ok(Self {
+                id: row.int(0)?,
+                title: row.str(1)?,
+            })
+        }
+
+        fn set_id(&mut self, id: Value) {
+            if let Value::Int(id) = id {
+                self.id = id;
+            }
+        }
+
+        fn id(&self) -> Value {
+            Value::int(self.id)
+        }
+    }
+
+    #[derive(Clone)]
+    struct Product {
+        sku: String,
+        price: rust_decimal::Decimal,
+    }
+
+    impl Model for Product {
+        fn table() -> Table {
+            Table("products")
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![Field::key("sku"), Field::new("price", Type::Decimal)]
+        }
+
+        fn row(&self) -> Vec<Value> {
+            vec![Value::str(&self.sku), Value::decimal(self.price)]
+        }
+
+        fn from_row(row: &Row) -> Result<Self, StoreError> {
+            Ok(Self {
+                sku: row.str(0)?,
+                price: row.decimal(1)?,
+            })
+        }
+
+        fn set_id(&mut self, id: Value) {
+            if let Value::Str(id) = id {
+                self.sku = id;
+            }
+        }
+
+        fn id(&self) -> Value {
+            Value::str(&self.sku)
+        }
+    }
+
+    #[test]
+    fn spec() {
+        let spec = Post::spec();
+        assert_eq!(spec.table, Table("posts"));
+        assert_eq!(spec.rules, Vec::new());
+        assert_eq!(Post::spec().key(), Name("id"));
+        assert_eq!(Product::spec().key(), Name("sku"));
+        assert_eq!(Post::columns(), vec![Name("title")]);
+        assert_eq!(Post::search(), vec![Name("title")]);
+    }
+
+    #[test]
+    fn sorts() {
+        let schema = Post::spec();
+        assert_eq!(
+            Sort::parse("title", &schema),
+            Sort {
+                field: Name("title"),
+                order: Order::Asc,
+            }
+        );
+        assert_eq!(
+            Sort::parse("-title", &schema),
+            Sort {
+                field: Name("title"),
+                order: Order::Desc,
+            }
+        );
+        assert_eq!(
+            Sort::parse("junk", &schema),
+            Sort {
+                field: Name("id"),
+                order: Order::Asc,
+            }
+        );
+    }
+
+    #[test]
+    fn keys() {
+        assert_eq!(Key::parse("7", &Post::spec()).value(), Value::int(7));
+        assert_eq!(Key::parse("7", &Product::spec()).value(), Value::str("7"));
+        assert_eq!(Key::parse("x", &Post::spec()).value(), Value::str("x"));
+    }
+
+    #[tokio::test]
+    async fn gets() {
+        let path =
+            std::env::temp_dir().join(format!("rango-test-{}-gets.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::store::sqlite::open(&path).await.unwrap();
+        let repo = Repository::<Post>::new(store);
+        let mut post = Post {
+            id: 0,
+            title: "hello".into(),
+        };
+        repo.save(&mut post).await.unwrap();
+        let found = repo.get(&Value::int(post.id)).await.unwrap().unwrap();
+        assert_eq!(found.title, "hello");
+        assert!(repo.get(&Value::int(999)).await.unwrap().is_none());
+        let projected = repo
+            .scan_query(&Query {
+                tree: Tree::And(Vec::new()),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![Name("title")]),
+                mass: None,
+            })
+            .await;
+        assert!(matches!(projected, Err(StoreError::Unsupported(_))));
+    }
+}

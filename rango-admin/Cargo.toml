@@ -1,0 +1,12 @@
+[package]
+name = "rango-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rango-core = { workspace = true, features = ["forgery"] }
+rango-authentication.workspace = true
+askama.workspace = true
+axum.workspace = true
+serde_urlencoded.workspace = true

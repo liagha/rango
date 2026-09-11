@@ -1,0 +1,33 @@
+:root {
+  --bg: #f7f7f8;
+  --fg: #20202a;
+  --line: #dcdce0;
+  --accent: #3b5bdb;
+  --card: #ffffff;
+}
+
+[data-theme="dark"] {
+  --bg: #17171c;
+  --fg: #e6e6ec;
+  --line: #2c2c36;
+  --accent: #7c9bff;
+  --card: #21212b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.wrap { max-width: 44rem; margin: 0 auto; padding: 2rem 1rem; }
+
+a { color: var(--accent); }
+
+h1 { font-size: 1.6rem; }
+
+ul { padding-left: 1.2rem; }

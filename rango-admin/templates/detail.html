@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} {{ id }} · Admin{% endblock %}
+{% block nav %}<a href="../../">Admin</a> / <a href="../{{ query }}">{{ title }}</a> / {{ id }}{% endblock %}
+{% block main %}
+<h1>{{ title }} {{ id }}</h1>
+{% if !notice.is_empty() %}<p class="done">{{ notice }}</p>{% endif %}
+<p class="actions"><a class="btn" href="edit/{{ query }}">Edit</a></p>
+<div class="scroll">
+<table>
+<tbody>
+{% for pair in pairs %}
+<tr><th>{{ pair.name }}</th><td>{% if pair.value.is_empty() %}<span class="muted">—</span>{% else %}{{ pair.value }}{% endif %}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<form method="post" action="delete/{{ query }}" onsubmit="return confirm('Delete this row?')">
+<input type="hidden" name="forgery" value="{{ token }}">
+<p class="actions"><button class="ghost" type="submit">Delete</button></p>
+</form>
+{% for inline in inlines %}
+<h2>{{ inline.title }}</h2>
+{% if inline.rows.is_empty() %}
+<p class="muted">None.</p>
+{% else %}
+<div class="scroll">
+<table>
+<thead>
+<tr>{% for column in inline.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr>
+</thead>
+<tbody>
+{% for row in inline.rows %}
+<tr>
+<td><a href="../../{{ inline.title }}/{{ row.id }}/">{{ row.id }}</a></td>
+{% for cell in row.cells %}<td>{% if cell.is_empty() %}<span class="muted">—</span>{% else %}{{ cell }}{% endif %}</td>{% endfor %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<p><a href="{{ inline.href }}">View all</a></p>
+{% endif %}
+{% endfor %}
+<h2>History</h2>
+{% if past.is_empty() %}
+<p class="muted">No changes yet.</p>
+{% else %}
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">What</th></tr>
+</thead>
+<tbody>
+{% for log in past %}
+<tr><td>{{ log.at }}</td><td>{{ log.user }}</td><td>{{ log.action }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

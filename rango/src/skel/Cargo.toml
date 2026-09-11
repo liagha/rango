@@ -1,0 +1,10 @@
+[package]
+name = "{NAME}"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+rango = { path = "{PATH}" }
+tokio = { version = "1.53", features = ["full"] }

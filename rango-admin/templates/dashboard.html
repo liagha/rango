@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Admin{% endblock %}
+{% block main %}
+<h1>Admin</h1>
+<div class="scroll">
+<table>
+<tbody>
+<tr><th scope="col">Model</th><th scope="col">Rows</th><th scope="col">Actions</th></tr>
+{% for entry in entries %}
+<tr><td><a href="{{ entry.href }}">{{ entry.title }}</a></td><td>{{ entry.count }}</td><td><a href="{{ entry.href }}new/">Add</a></td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endblock %}

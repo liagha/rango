@@ -663,12 +663,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "helloworld"
 version = "0.1.0"
 dependencies = [
- "rango-admin",
- "rango-auth",
- "rango-cli",
- "rango-core",
+ "rango",
  "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1264,18 +1260,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rango"
+version = "0.1.0"
+dependencies = [
+ "rango-admin",
+ "rango-authentication",
+ "rango-core",
+ "rango-store",
+ "rpassword",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rango-admin"
 version = "0.1.0"
 dependencies = [
  "askama",
  "axum",
- "rango-auth",
+ "rango-authentication",
  "rango-core",
  "serde_urlencoded",
 ]
 
 [[package]]
-name = "rango-auth"
+name = "rango-authentication"
 version = "0.1.0"
 dependencies = [
  "askama",
@@ -1285,16 +1294,6 @@ dependencies = [
  "rango-core",
  "serde_urlencoded",
  "sha2",
-]
-
-[[package]]
-name = "rango-cli"
-version = "0.1.0"
-dependencies = [
- "rango-auth",
- "rango-core",
- "rango-store",
- "rpassword",
 ]
 
 [[package]]

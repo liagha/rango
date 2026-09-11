@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rango-admin",
-    "crates/rango-auth",
-    "crates/rango-cli",
-    "crates/rango-core",
-    "crates/rango-macros",
-    "crates/rango-store",
+    "rango",
+    "rango-admin",
+    "rango-authentication",
+    "rango-core",
+    "rango-macros",
+    "rango-store",
     "examples/helloworld",
 ]
 
@@ -16,12 +16,12 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-rango-admin = { path = "crates/rango-admin", version = "0.1.0" }
-rango-auth = { path = "crates/rango-auth", version = "0.1.0" }
-rango-cli = { path = "crates/rango-cli", version = "0.1.0" }
-rango-core = { path = "crates/rango-core", version = "0.1.0" }
-rango-macros = { path = "crates/rango-macros", version = "0.1.0" }
-rango-store = { path = "crates/rango-store", version = "0.1.0", default-features = false }
+rango = { path = "rango", version = "0.1.0" }
+rango-admin = { path = "rango-admin", version = "0.1.0" }
+rango-authentication = { path = "rango-authentication", version = "0.1.0" }
+rango-core = { path = "rango-core", version = "0.1.0" }
+rango-macros = { path = "rango-macros", version = "0.1.0" }
+rango-store = { path = "rango-store", version = "0.1.0", default-features = false }
 
 axum = { version = "0.8.9", features = ["form"] }
 askama = "0.16.1"

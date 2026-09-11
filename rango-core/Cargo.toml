@@ -1,0 +1,29 @@
+[package]
+name = "rango-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rango_core"
+
+[features]
+default = ["forgery", "sqlite"]
+forgery = ["dep:serde_urlencoded"]
+sqlite = ["rango-store/sqlite"]
+
+[dependencies]
+axum.workspace = true
+askama.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+rango-store.workspace = true
+rango-macros.workspace = true
+serde.workspace = true
+serde_urlencoded = { workspace = true, optional = true }
+chrono.workspace = true
+rust_decimal.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

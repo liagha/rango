@@ -1,0 +1,17 @@
+[package]
+name = "rango"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rango"
+
+[dependencies]
+rango-core.workspace = true
+rango-store.workspace = true
+rango-admin.workspace = true
+rango-authentication.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rpassword = "7"

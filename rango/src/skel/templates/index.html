@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h1>Messages</h1>
+  {% if user.is_empty() %}
+    <p><a href="/login">log in</a></p>
+  {% else %}
+    <p>hi {{ user }} · <a href="/admin/">admin</a></p>
+  {% endif %}
+  <ul>
+    {% for message in messages %}
+      <li><b>{{ message.name }}</b> — {{ message.message }}</li>
+    {% endfor %}
+  </ul>
+{% endblock %}

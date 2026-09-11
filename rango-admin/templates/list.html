@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Admin{% endblock %}
+{% block nav %}<a href="../">Admin</a> / {{ title }}{% endblock %}
+{% block main %}
+<h1>{{ title }}</h1>
+{% if !notice.is_empty() %}<p class="done">{{ notice }}</p>{% endif %}
+<p><a class="btn" href="new/{{ query }}">Add</a></p>
+<form class="bar" method="get" action="?">
+<input type="search" name="q" value="{{ q }}" placeholder="Search {{ title }}…">
+{% if !sort.is_empty() %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+{% for item in held %}<input type="hidden" name="{{ item.name }}" value="{{ item.value }}">{% endfor %}
+<button type="submit">Search</button>
+<a href="?">Clear</a>
+</form>
+{% if !filters.is_empty() %}
+<details>
+<summary>Filters</summary>
+<form method="get" action="?">
+<input type="hidden" name="q" value="{{ q }}">
+{% if !sort.is_empty() %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+<div class="filters">
+{% for filter in filters %}
+<div>{{ filter|safe }}</div>
+{% endfor %}
+</div>
+<p class="actions"><button type="submit">Apply</button><a href="?">Clear</a></p>
+</form>
+</details>
+{% endif %}
+<p class="muted">{{ total }} row{% if total != 1 %}s{% endif %}{% if total > 0 %} · showing {{ lo }}–{{ hi }}{% endif %}{% if pages > 1 %} · page {{ page }} of {{ pages }}{% endif %}</p>
+{% if !actions.is_empty() %}
+<form id="deeds" method="post" action="actions/">
+<input type="hidden" name="forgery" value="{{ token }}">
+<input type="hidden" name="back" value="{{ query }}">
+<p class="bar">
+<select name="action">
+{% for action in actions %}<option value="{{ action.name }}">{{ action.title }}</option>{% endfor %}
+</select>
+<button type="submit">Apply</button>
+</p>
+</form>
+{% endif %}
+{% if rows.is_empty() %}
+<p class="muted">No rows match.</p>
+{% else %}
+<div class="scroll">
+<table>
+<thead>
+<tr>{% if !actions.is_empty() %}<th scope="col"><input type="checkbox" id="all"></th>{% endif %}{% for column in columns %}<th scope="col"><a href="{{ column.href }}">{{ column.name }} {{ column.marker }}</a></th>{% endfor %}<th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for row in rows %}
+<tr>
+{% if !actions.is_empty() %}<td><input type="checkbox" class="pick" form="deeds" name="ids" value="{{ row.id }}"></td>{% endif %}
+<td><a href="{{ row.id }}/{{ query }}">{{ row.id }}</a></td>
+{% for cell in row.cells %}<td>{% if cell.is_empty() %}<span class="muted">—</span>{% else %}{{ cell }}{% endif %}</td>{% endfor %}
+<td><a href="{{ row.id }}/edit/{{ query }}">Edit</a>{% for action in actions %}{% if action.row %}<form class="solo" method="post" action="actions/" onsubmit="return confirm('Run &quot;{{ action.title }}&quot; on this row?')"><input type="hidden" name="forgery" value="{{ token }}"><input type="hidden" name="back" value="{{ query }}"><input type="hidden" name="action" value="{{ action.name }}"><input type="hidden" name="ids" value="{{ row.id }}"><button type="submit">{{ action.title }}</button></form>{% endif %}{% endfor %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{% if !actions.is_empty() %}
+<script>
+const all = document.getElementById("all");
+if (all !== null) {
+    all.onchange = () => {
+        document.querySelectorAll(".pick").forEach((box) => {
+            box.checked = all.checked;
+        });
+    };
+}
+</script>
+{% endif %}
+{% if pages > 1 %}
+<div class="pager">
+{% if let Some(href) = first %}<a href="{{ href }}">First</a>{% endif %}
+{% if let Some(href) = prev %}<a href="{{ href }}">← Prev</a>{% endif %}
+<span class="muted">Page {{ page }} of {{ pages }}</span>
+{% if let Some(href) = next %}<a href="{{ href }}">Next →</a>{% endif %}
+{% if let Some(href) = last %}<a href="{{ href }}">Last</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}
