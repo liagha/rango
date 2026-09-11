@@ -1,4 +1,4 @@
-use crate::{Column, ColumnKind, Value};
+use crate::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Table(pub &'static str);
@@ -40,9 +40,12 @@ pub enum Type {
     Bool,
     Moment,
     Decimal,
-    Ref,
     Many,
     Opt(Box<Type>),
+}
+
+pub fn many(kind: &Type) -> bool {
+    matches!(kind.flat(), Type::Many)
 }
 
 impl Type {
@@ -90,8 +93,6 @@ pub enum Op {
     More,
     Less,
     At,
-    In,
-    Out,
     Like,
     Bare,
 }
@@ -291,8 +292,7 @@ impl Field {
     pub fn reference(&self) -> Option<(Table, Name)> {
         match self.link {
             Some(Link::To(table, name)) => Some((table, name)),
-            Some(Link::Via(..)) => todo!("phase 3"),
-            None => None,
+            _ => None,
         }
     }
 }
@@ -312,182 +312,11 @@ impl Schema {
             .map(|field| field.name)
             .unwrap_or(Name("id"))
     }
-
-    pub fn kinds(&self) -> Vec<ColumnKind> {
-        self.fields
-            .iter()
-            .map(|field| affinity(&field.kind))
-            .collect()
-    }
-
-    pub fn ddl(&self) -> String {
-        let columns: Vec<String> = self.fields.iter().map(column).collect();
-        format!(
-            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-            self.table,
-            columns.join(", ")
-        )
-    }
-
-    pub fn alter(&self, have: &[Column]) -> Vec<String> {
-        let moved = self.moved(have);
-        let mut out = Vec::new();
-        for field in &self.fields {
-            if field.kind == Type::Id {
-                continue;
-            }
-            if !have.iter().any(|col| col.name == field.name.as_str())
-                && !moved.iter().any(|(_, name)| name == field.name.as_str())
-            {
-                out.push(format!(
-                    "ALTER TABLE \"{}\" ADD COLUMN {}",
-                    self.table,
-                    column(field)
-                ));
-            }
-        }
-        out
-    }
-
-    pub fn drop(&self, have: &[Column]) -> Vec<String> {
-        let moved = self.moved(have);
-        let mut out = Vec::new();
-        for col in have {
-            if col.name == "id" {
-                continue;
-            }
-            if !self
-                .fields
-                .iter()
-                .any(|field| field.name.as_str() == col.name.as_str())
-                && !moved.iter().any(|(name, _)| name == &col.name)
-            {
-                out.push(format!(
-                    "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
-                    self.table, col.name
-                ));
-            }
-        }
-        out
-    }
-
-    pub fn rename(&self, have: &[Column]) -> Vec<String> {
-        self.moved(have)
-            .into_iter()
-            .map(|(old, name)| {
-                format!(
-                    "ALTER TABLE \"{}\" RENAME COLUMN \"{old}\" TO \"{name}\"",
-                    self.table
-                )
-            })
-            .collect()
-    }
-
-    fn moved(&self, have: &[Column]) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for kind in [ColumnKind::Integer, ColumnKind::Real, ColumnKind::Text] {
-            let gone: Vec<&String> = have
-                .iter()
-                .filter(|col| {
-                    col.name != "id"
-                        && col.kind == kind
-                        && !self
-                            .fields
-                            .iter()
-                            .any(|field| field.name.as_str() == col.name.as_str())
-                })
-                .map(|col| &col.name)
-                .collect();
-            let fresh: Vec<&Field> = self
-                .fields
-                .iter()
-                .filter(|field| {
-                    field.kind != Type::Id
-                        && affinity(&field.kind) == kind
-                        && !have.iter().any(|col| col.name == field.name.as_str())
-                })
-                .collect();
-            if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
-                out.push(((*old).clone(), new.name.to_string()));
-            }
-        }
-        out
-    }
-}
-
-pub(crate) fn affinity(kind: &Type) -> ColumnKind {
-    match kind {
-        Type::Id | Type::Int | Type::Moment | Type::Bool => ColumnKind::Integer,
-        Type::Float => ColumnKind::Real,
-        Type::Str | Type::Key | Type::Decimal => ColumnKind::Text,
-        Type::Ref => todo!("phase 2"),
-        Type::Many => todo!("phase 3"),
-        Type::Opt(inner) => affinity(inner),
-    }
-}
-
-fn literal(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".into(),
-        Value::Int(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Str(value) => format!("'{}'", value.replace('\'', "''")),
-        Value::Bool(value) => {
-            if *value {
-                "1".into()
-            } else {
-                "0".into()
-            }
-        }
-        Value::DateTime(at) => at.timestamp().to_string(),
-        Value::Decimal(value) => format!("'{value}'"),
-    }
-}
-
-fn sql(kind: &Type) -> &'static str {
-    match kind {
-        Type::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
-        Type::Key => "TEXT PRIMARY KEY",
-        Type::Str => "TEXT",
-        Type::Int | Type::Moment => "INTEGER",
-        Type::Float => "REAL",
-        Type::Bool => "INTEGER",
-        Type::Decimal => "TEXT",
-        Type::Ref => todo!("phase 2"),
-        Type::Many => todo!("phase 3"),
-        Type::Opt(inner) => sql(inner),
-    }
-}
-
-fn column(field: &Field) -> String {
-    let mut base = sql(&field.kind).to_string();
-    if !matches!(field.kind.flat(), Type::Id | Type::Key) {
-        if let Some((table, column)) = field.reference() {
-            base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\")"));
-        }
-        if field.unique {
-            base.push_str(" UNIQUE");
-        }
-        if !field.kind.is_optional() {
-            base.push_str(" NOT NULL");
-        }
-        if let Some(default) = &field.default {
-            base.push_str(&format!(" DEFAULT {}", literal(default)));
-        }
-    }
-    format!("\"{}\" {}", field.name, base)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn col(name: &str, kind: ColumnKind) -> Column {
-        Column {
-            name: name.to_string(),
-            kind,
-        }
-    }
 
     fn schema() -> Schema {
         Schema {
@@ -503,76 +332,6 @@ mod tests {
             fields: vec![Field::key("sku"), Field::new("price", Type::Decimal)],
             rules: Vec::new(),
         }
-    }
-
-    #[test]
-    fn ddl() {
-        assert_eq!(
-            schema().ddl(),
-            "CREATE TABLE IF NOT EXISTS \"posts\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"title\" TEXT NOT NULL)"
-        );
-    }
-
-    #[test]
-    fn key_ddl() {
-        assert_eq!(
-            keyed().ddl(),
-            "CREATE TABLE IF NOT EXISTS \"products\" (\"sku\" TEXT PRIMARY KEY, \"price\" TEXT NOT NULL)"
-        );
-    }
-
-    #[test]
-    fn adds() {
-        let schema = schema();
-        let have = vec![
-            col("id", ColumnKind::Integer),
-            col("title", ColumnKind::Text),
-        ];
-        assert!(schema.alter(&have).is_empty());
-        let missing = vec![col("id", ColumnKind::Integer)];
-        assert_eq!(schema.alter(&missing).len(), 1);
-    }
-
-    #[test]
-    fn drops() {
-        let schema = schema();
-        let have = vec![
-            col("id", ColumnKind::Integer),
-            col("title", ColumnKind::Text),
-            col("junk", ColumnKind::Text),
-        ];
-        let drop = schema.drop(&have);
-        assert_eq!(drop.len(), 1);
-        assert!(schema.drop(&have[..2]).is_empty());
-    }
-
-    #[test]
-    fn renames() {
-        let schema = schema();
-        let have = vec![
-            col("id", ColumnKind::Integer),
-            col("name", ColumnKind::Text),
-        ];
-        let rename = schema.rename(&have);
-        assert_eq!(rename.len(), 1);
-        assert!(schema.alter(&have).is_empty());
-        assert!(schema.drop(&have).is_empty());
-        let mixed = vec![
-            col("id", ColumnKind::Integer),
-            col("name", ColumnKind::Text),
-            col("age", ColumnKind::Integer),
-        ];
-        assert_eq!(schema.rename(&mixed).len(), 1);
-        assert!(schema.alter(&mixed).is_empty());
-        assert_eq!(schema.drop(&mixed).len(), 1);
-    }
-
-    #[test]
-    fn affinities() {
-        assert_eq!(
-            schema().kinds(),
-            vec![ColumnKind::Integer, ColumnKind::Text]
-        );
     }
 
     #[test]

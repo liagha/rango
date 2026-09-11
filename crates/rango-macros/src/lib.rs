@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, ExprLit, Fields, LitStr};
 
-#[proc_macro_derive(Model, attributes(model, key, references, default))]
+#[proc_macro_derive(Model, attributes(model, key, references, via, default))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
     match expand(&input) {
@@ -28,27 +28,51 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut from_fields = Vec::new();
     let mut set_id_stmt = None;
     let mut id_expr = None;
+    let mut pos = 0usize;
 
-    for (idx, field) in fields.into_iter().enumerate() {
+    for field in fields.into_iter() {
         let ident = field.ident.as_ref().unwrap();
         let attrs = &field.attrs;
         let ty = &field.ty;
 
         let is_key = attrs.iter().any(|a| a.path().is_ident("key"));
         let references = parse_references(attrs)?;
+        let via = parse_via(attrs)?;
         let default = parse_default(attrs)?;
 
         let (field_type, is_optional) = unpack_option(ty);
+        let (field_type, is_many) = unpack_vec(field_type);
+        if is_many && is_optional {
+            return Err(syn::Error::new_spanned(
+                field,
+                "optional lists need plain Vec",
+            ));
+        }
+        if is_many && is_key {
+            return Err(syn::Error::new_spanned(field, "key needs a single value"));
+        }
         let type_path = type_string(field_type);
 
         let kind = kind_of(&type_path);
         let name = ident.to_string();
-        let is_id = is_key && name == "id" && kind == Kind::Int;
+        let is_id = is_key && name == "id" && kind == Kind::Int && !is_many;
 
         let field_def = if is_id {
             quote! { rango::Field::id() }
         } else if is_key {
             quote! { rango::Field::key(#name) }
+        } else if is_many {
+            let mut def = quote! { rango::Field::new(#name, rango::Type::Many) };
+            if let Some((through, mine, theirs)) = via {
+                def = quote! {
+                    #def.link(rango::Link::Via(
+                        rango::Table(#through),
+                        rango::Name(#mine),
+                        rango::Name(#theirs)
+                    ))
+                };
+            }
+            def
         } else {
             let mut def = match kind {
                 Kind::Str | Kind::Other => {
@@ -72,7 +96,12 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             def
         };
 
-        let field_idx = syn::Index::from(idx);
+        if is_many {
+            from_fields.push(quote! { #ident: Vec::new() });
+            continue;
+        }
+        let field_idx = syn::Index::from(pos);
+        pos += 1;
 
         let row_expr = match kind {
             Kind::Str => {
@@ -311,6 +340,29 @@ fn parse_references(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
     Ok(None)
 }
 
+fn parse_via(attrs: &[syn::Attribute]) -> syn::Result<Option<(String, String, String)>> {
+    for attr in attrs {
+        if !attr.path().is_ident("via") {
+            continue;
+        }
+        let lit: LitStr = attr.parse_args()?;
+        let text = lit.value();
+        let parts: Vec<&str> = text.split('.').collect();
+        if let [through, mine, theirs] = parts.as_slice() {
+            return Ok(Some((
+                through.to_string(),
+                mine.to_string(),
+                theirs.to_string(),
+            )));
+        }
+        return Err(syn::Error::new_spanned(
+            attr,
+            "expected `#[via(\"through.mine.theirs\")]`",
+        ));
+    }
+    Ok(None)
+}
+
 fn parse_default(attrs: &[syn::Attribute]) -> syn::Result<Option<proc_macro2::TokenStream>> {
     for attr in attrs {
         if !attr.path().is_ident("default") {
@@ -334,6 +386,18 @@ fn unpack_option(ty: &syn::Type) -> (&syn::Type, bool) {
     if let syn::Type::Path(tp) = ty
         && let Some(segment) = tp.path.segments.last()
         && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return (inner, true);
+    }
+    (ty, false)
+}
+
+fn unpack_vec(ty: &syn::Type) -> (&syn::Type, bool) {
+    if let syn::Type::Path(tp) = ty
+        && let Some(segment) = tp.path.segments.last()
+        && segment.ident == "Vec"
         && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {

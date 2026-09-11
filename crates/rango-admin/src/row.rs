@@ -1,6 +1,6 @@
 use rango::{
     chrono::{DateTime, Utc},
-    model::{Field, Model, Name, Type},
+    model::{Field, Model, Name, Type, many},
     store::Value,
 };
 
@@ -42,7 +42,7 @@ pub(crate) fn locate(names: &[Name], fields: &[Field]) -> Vec<usize> {
     for name in names {
         if let Some(i) = fields
             .iter()
-            .position(|field| field.name == *name && field.kind != Type::Id)
+            .position(|field| field.name == *name && field.kind != Type::Id && !many(&field.kind))
             && !out.contains(&i)
         {
             out.push(i);
@@ -58,11 +58,28 @@ pub(crate) fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
         if field.kind == Type::Id {
             continue;
         }
+        if many(&field.kind) {
+            out.push(Value::Null);
+            continue;
+        }
         let value = values.next().unwrap_or(Value::Null);
         if matches!(field.kind.flat(), Type::Key) {
             continue;
         }
         out.push(value);
+    }
+    out
+}
+
+pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(fields.len());
+    let mut slots = values.iter();
+    for field in fields {
+        if many(&field.kind) {
+            out.push(Value::Null);
+        } else {
+            out.push(slots.next().cloned().unwrap_or(Value::Null));
+        }
     }
     out
 }

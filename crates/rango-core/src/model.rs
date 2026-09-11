@@ -9,7 +9,7 @@ use crate::{
 
 pub use crate::store::{
     Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule, Schema,
-    Sort, Table, Tree, Type,
+    Sort, Table, Tree, Type, many,
 };
 
 pub trait Model: Clone + Send + Sync + 'static {
@@ -23,7 +23,7 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn columns() -> Vec<Name> {
         Self::fields()
             .iter()
-            .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key))
+            .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key) && !many(&f.kind))
             .map(|f| f.name)
             .collect()
     }
@@ -38,10 +38,6 @@ pub trait Model: Clone + Send + Sync + 'static {
 
     fn readonly() -> Vec<Name> {
         Vec::new()
-    }
-
-    fn ddl() -> String {
-        Self::schema().ddl()
     }
 
     fn schema() -> Schema {
@@ -65,6 +61,100 @@ pub fn key<M: Model>(raw: &str) -> Value {
     Key::parse(raw, &M::schema()).value()
 }
 
+pub async fn related<M: Model>(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    model: &M,
+    field: Name,
+) -> Result<Vec<Row>, StoreError> {
+    let bad = |msg: &str| StoreError::Value(msg.into());
+    let here = M::schema();
+    let many = here
+        .fields
+        .iter()
+        .find(|entry| entry.name == field)
+        .ok_or_else(|| bad("unknown field"))?;
+    if !crate::store::many(&many.kind) {
+        return Err(StoreError::Unsupported("single field needs filter".into()));
+    }
+    let (through_table, mine, theirs) = match &many.link {
+        Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
+        _ => return Err(bad("many field needs via")),
+    };
+    let through = schemas
+        .iter()
+        .find(|spec| spec.table == through_table)
+        .ok_or_else(|| bad("unknown through"))?;
+    let their = through
+        .fields
+        .iter()
+        .find(|entry| entry.name == theirs)
+        .ok_or_else(|| bad("unknown through column"))?;
+    let (target_table, target_col) = match &their.link {
+        Some(Link::To(table, name)) => (*table, *name),
+        _ => return Err(bad("through column needs references")),
+    };
+    let target = schemas
+        .iter()
+        .find(|spec| spec.table == target_table)
+        .ok_or_else(|| bad("unknown target"))?;
+    store.define(through).await?;
+    store.define(target).await?;
+    let links = store
+        .scan_query(
+            through,
+            &Query {
+                tree: Tree::Leaf(Filter {
+                    field: mine,
+                    op: Op::Eq,
+                    value: model.id(),
+                }),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![theirs]),
+                mass: None,
+            },
+        )
+        .await?;
+    let mut ids = Vec::new();
+    for row in &links {
+        if let Some(id) = row.get(0)
+            && *id != Value::Null
+            && !ids.contains(id)
+        {
+            ids.push(id.clone());
+        }
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let leaves = ids
+        .into_iter()
+        .map(|id| {
+            Tree::Leaf(Filter {
+                field: target_col,
+                op: Op::Eq,
+                value: id,
+            })
+        })
+        .collect();
+    store
+        .scan_query(
+            target,
+            &Query {
+                tree: Tree::Or(leaves),
+                sort: vec![Sort {
+                    field: target.key(),
+                    order: Order::Asc,
+                }],
+                page: Page::all(),
+                only: Only::All,
+                mass: None,
+            },
+        )
+        .await
+}
+
 pub struct Repository<M = ()> {
     store: Arc<dyn Store>,
     marker: PhantomData<M>,
@@ -74,7 +164,7 @@ fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
     let mut values = model.row().into_iter();
     M::fields()
         .into_iter()
-        .filter(|field| field.kind != Type::Id)
+        .filter(|field| field.kind != Type::Id && !many(&field.kind))
         .map(|field| {
             let value = values.next().unwrap_or(Value::Null);
             let value = match field.default {

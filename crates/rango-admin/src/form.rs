@@ -1,5 +1,5 @@
 use rango::chrono::NaiveDateTime;
-use rango::model::{Field, Type};
+use rango::model::{Field, Type, many};
 use rango::{Error, store::Value};
 
 use super::row::text;
@@ -29,6 +29,9 @@ pub(crate) fn locked(field: &Field, value: Option<&Value>) -> String {
 }
 
 pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
+    if many(&field.kind) {
+        return Ok(Value::Null);
+    }
     let kind = field.kind.flat();
     let raw = raw.map(String::as_str).unwrap_or("");
     if raw.is_empty() && matches!(kind, Type::Bool) {
@@ -60,8 +63,7 @@ pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error>
             .map(Value::decimal)
             .map_err(|_| bad(field, "a decimal")),
         Type::Bool => Ok(Value::bool(raw == "on")),
-        Type::Ref => todo!("phase 2"),
-        Type::Many => todo!("phase 3"),
+        Type::Many => Ok(Value::Null),
     }
 }
 
@@ -69,7 +71,7 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
     let name = field.name;
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
     match field.kind.flat() {
-        Type::Id | Type::Opt(_) => String::new(),
+        Type::Id | Type::Many | Type::Opt(_) => String::new(),
         Type::Str | Type::Key | Type::Decimal => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="text" value="{}">"#,
@@ -94,8 +96,6 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
                 if checked { " checked" } else { "" }
             )
         }
-        Type::Ref => todo!("phase 2"),
-        Type::Many => todo!("phase 3"),
     }
 }
 
@@ -108,7 +108,7 @@ pub(crate) fn filter_input(field: &Field, value: &str) -> String {
     let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
     let value = escape(value);
     match field.kind.flat() {
-        Type::Id | Type::Opt(_) => String::new(),
+        Type::Id | Type::Many | Type::Opt(_) => String::new(),
         Type::Str | Type::Key | Type::Decimal => {
             format!(
                 r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
@@ -132,8 +132,6 @@ pub(crate) fn filter_input(field: &Field, value: &str) -> String {
                 picked("0")
             )
         }
-        Type::Ref => todo!("phase 2"),
-        Type::Many => todo!("phase 3"),
     }
 }
 

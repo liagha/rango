@@ -4,10 +4,10 @@ pub mod sqlite;
 
 pub use spec::{
     Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule, Schema,
-    Sort, Table, Tree, Type,
+    Sort, Table, Tree, Type, many,
 };
 
-use std::{fmt, future::Future, pin::Pin};
+use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -252,6 +252,17 @@ pub trait Store: Send + Sync + 'static {
             let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({marks})");
             self.execute(&sql, values).await?;
             self.last_id(table).await
+        })
+    }
+
+    fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
+        Box::pin(async { Err(StoreError::Unsupported("deal".into())) })
+    }
+
+    fn settle(self: Arc<Self>, commit: bool) -> BoxFuture<'static, Result<(), StoreError>> {
+        Box::pin(async move {
+            let _ = commit;
+            Ok(())
         })
     }
 }

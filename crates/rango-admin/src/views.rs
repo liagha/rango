@@ -8,7 +8,9 @@ use axum::{
 use rango::{
     Error, Repository, Response, Row, Store, Value,
     forgery::{Token, cookie},
-    model::{Filter, Model, Only, Op, Order, Page, Query, Schema, Sort, Table, Tree, Type, key},
+    model::{
+        Filter, Model, Only, Op, Order, Page, Query, Schema, Sort, Table, Tree, Type, key, many,
+    },
     view::{self, render},
 };
 use rango_auth::Current;
@@ -16,7 +18,7 @@ use rango_auth::Current;
 use super::form::{filter_input, input, input_raw, locked, value};
 use super::history::{Action, History, log};
 use super::query::{PAGE, encode, here, href, tree};
-use super::row::{cell, id_of, locate, text, when, with_id};
+use super::row::{align, cell, id_of, locate, text, when, with_id};
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -266,7 +268,7 @@ pub(crate) async fn list<M: Model>(
     }
     let filters = fields
         .iter()
-        .filter(|field| field.kind != Type::Id)
+        .filter(|field| field.kind != Type::Id && !many(&field.kind))
         .map(|field| {
             filter_input(
                 field,
@@ -373,14 +375,17 @@ pub(crate) async fn detail<M: Model>(
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, field)| !matches!(field.kind.flat(), Type::Id | Type::Key))
+                .filter(|(_, field)| {
+                    !matches!(field.kind.flat(), Type::Id | Type::Key) && !many(&field.kind)
+                })
                 .map(|(i, _)| i)
                 .collect();
             let mut items = Vec::new();
             for row in &rows {
+                let values = align(&row.values, &other.fields);
                 items.push(Item {
-                    id: id_of(&row.values, &other.fields),
-                    cells: at.iter().map(|&i| cell(&row.values, i)).collect(),
+                    id: id_of(&values, &other.fields),
+                    cells: at.iter().map(|&i| cell(&values, i)).collect(),
                 });
             }
             inlines.push(Inline {

@@ -19,7 +19,7 @@ pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
 pub use model::{
     Check, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Pick, Query,
-    Repository, Rule, Schema, Sort, Table, Tree, Type, id_column, key,
+    Repository, Rule, Schema, Sort, Table, Tree, Type, id_column, key, many, related,
 };
 pub use settings::Settings;
 pub use urls::Routes;
