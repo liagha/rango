@@ -197,6 +197,14 @@ pub enum Key {
 }
 
 impl Key {
+    pub fn of(value: &Value) -> Result<Self, crate::StoreError> {
+        match value {
+            Value::Int(id) => Ok(Key::Int(*id)),
+            Value::Str(text) => Ok(Key::Text(text.clone())),
+            _ => Err(crate::StoreError::Value("bad key".into())),
+        }
+    }
+
     pub fn parse(raw: &str, schema: &Schema) -> Self {
         let keyed = schema
             .fields
@@ -574,6 +582,13 @@ mod tests {
         assert_eq!(Key::parse("7", &schema()).value(), Value::int(7));
         assert_eq!(Key::parse("7", &keyed()).value(), Value::str("7"));
         assert_eq!(Key::parse("x", &schema()).value(), Value::str("x"));
+    }
+
+    #[test]
+    fn key_of() {
+        assert_eq!(Key::of(&Value::int(3)).unwrap(), Key::Int(3));
+        assert_eq!(Key::of(&Value::str("x")).unwrap(), Key::Text("x".into()));
+        assert!(Key::of(&Value::Null).is_err());
     }
 
     #[test]

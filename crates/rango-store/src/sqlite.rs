@@ -7,8 +7,8 @@ use sea_orm::{
 };
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Filter, Name, Only, Op, Order, Query, Row, Rows, Schema, Sort,
-    Store, StoreError, Tree, Value, spec::affinity,
+    BoxFuture, Column, ColumnKind, Filter, Key, Name, Only, Op, Order, Query, Row, Rows, Schema,
+    Sort, Store, StoreError, Tree, Type, Value, spec::affinity,
 };
 
 pub struct Sqlite {
@@ -324,6 +324,118 @@ impl Store for Sqlite {
         })
     }
 
+    fn define<'a>(&'a self, schema: &'a Schema) -> BoxFuture<'a, Result<(), StoreError>> {
+        let ddl = schema.ddl();
+        Box::pin(async move { self.execute(&ddl, &[]).await.map(|_| ()) })
+    }
+
+    fn create<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<Vec<Key>, StoreError>> {
+        let schema = schema.clone();
+        let batch = batch.to_vec();
+        Box::pin(async move {
+            if batch.is_empty() {
+                return Ok(Vec::new());
+            }
+            let keyed = schema
+                .fields
+                .iter()
+                .any(|field| matches!(field.kind.flat(), Type::Key));
+            if keyed {
+                let head = &batch[0];
+                let columns = head
+                    .iter()
+                    .map(|pair| format!("\"{}\"", pair.0))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut params = Vec::new();
+                let mut groups = Vec::new();
+                for cells in &batch {
+                    groups.push(format!("({})", vec!["?"; cells.len()].join(", ")));
+                    params.extend(cells.iter().map(|pair| pair.1.clone()));
+                }
+                let sql = format!(
+                    "INSERT INTO \"{}\" ({columns}) VALUES {}",
+                    schema.table,
+                    groups.join(", ")
+                );
+                self.execute(&sql, &params).await?;
+                let id = schema.key();
+                let mut out = Vec::with_capacity(batch.len());
+                for cells in &batch {
+                    let value = cells.iter().find(|pair| pair.0 == id).map(|pair| &pair.1);
+                    match value {
+                        Some(value) => out.push(Key::of(value)?),
+                        None => return Err(StoreError::Value("missing key".into())),
+                    }
+                }
+                return Ok(out);
+            }
+            let mut out = Vec::with_capacity(batch.len());
+            for cells in &batch {
+                let columns = cells
+                    .iter()
+                    .map(|pair| pair.0.to_string())
+                    .collect::<Vec<_>>();
+                let params = cells.iter().map(|pair| pair.1.clone()).collect::<Vec<_>>();
+                let id = self
+                    .insert(schema.table.as_str(), &columns, &params)
+                    .await?;
+                out.push(Key::Int(id));
+            }
+            Ok(out)
+        })
+    }
+
+    fn replace<'a>(
+        &'a self,
+        schema: &'a Schema,
+        key: &'a Key,
+        cells: &'a [(Name, Value)],
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        let schema = schema.clone();
+        let key = key.value();
+        let cells = cells.to_vec();
+        Box::pin(async move {
+            let mut sets = Vec::with_capacity(cells.len());
+            let mut params = Vec::with_capacity(cells.len() + 1);
+            for (name, value) in &cells {
+                sets.push(format!("\"{name}\" = ?"));
+                params.push(value.clone());
+            }
+            params.push(key);
+            let sql = format!(
+                "UPDATE \"{}\" SET {} WHERE \"{}\" = ?",
+                schema.table,
+                sets.join(", "),
+                schema.key()
+            );
+            self.execute(&sql, &params).await?;
+            Ok(())
+        })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        schema: &'a Schema,
+        key: &'a Key,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        let schema = schema.clone();
+        let key = key.value();
+        Box::pin(async move {
+            let sql = format!(
+                "DELETE FROM \"{}\" WHERE \"{}\" = ?",
+                schema.table,
+                schema.key()
+            );
+            self.execute(&sql, std::slice::from_ref(&key)).await?;
+            Ok(())
+        })
+    }
+
     fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
         let table = table.to_string();
         Box::pin(async move {
@@ -410,7 +522,7 @@ impl Store for Sqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Field, Page, Table, Type};
+    use crate::{Field, Page, Table};
     use chrono::NaiveDate;
 
     async fn open_db(name: &str) -> Arc<dyn Store> {
@@ -567,6 +679,61 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].str(1).unwrap(), "ann");
+    }
+
+    #[tokio::test]
+    async fn writes() {
+        let db = open_db("writes").await;
+        let schema = Schema {
+            table: Table("p"),
+            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            rules: Vec::new(),
+        };
+        db.define(&schema).await.unwrap();
+        let keys = db
+            .create(
+                &schema,
+                &[
+                    vec![(Name("name"), Value::str("a"))],
+                    vec![(Name("name"), Value::str("b"))],
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(keys, vec![Key::Int(1), Key::Int(2)]);
+        let keyed = Schema {
+            table: Table("k"),
+            fields: vec![Field::key("sku"), Field::new("price", Type::Int)],
+            rules: Vec::new(),
+        };
+        db.define(&keyed).await.unwrap();
+        let keys = db
+            .create(
+                &keyed,
+                &[vec![
+                    (Name("sku"), Value::str("s1")),
+                    (Name("price"), Value::int(5)),
+                ]],
+            )
+            .await
+            .unwrap();
+        assert_eq!(keys, vec![Key::Text("s1".into())]);
+        db.replace(&schema, &Key::Int(1), &[(Name("name"), Value::str("a2"))])
+            .await
+            .unwrap();
+        let rows = db
+            .scan_query(&schema, &ask(Tree::And(Vec::new())))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].str(1).unwrap(), "a2");
+        db.remove(&schema, &Key::Int(2)).await.unwrap();
+        assert_eq!(
+            db.total_query(&schema, &ask(Tree::And(Vec::new())))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

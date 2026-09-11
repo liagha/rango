@@ -4,7 +4,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use crate::{
     error::Error,
-    store::{ColumnKind, Row, Store, StoreError, Value},
+    store::{Row, Store, StoreError, Value},
 };
 
 pub use crate::store::{
@@ -57,10 +57,6 @@ pub trait Model: Clone + Send + Sync + 'static {
     }
 }
 
-fn kinds<M: Model>() -> Vec<ColumnKind> {
-    M::schema().kinds()
-}
-
 pub fn id_column<M: Model>() -> Name {
     M::schema().key()
 }
@@ -99,7 +95,7 @@ impl<M: Model> Repository<M> {
     }
 
     async fn ensure(&self) -> Result<(), StoreError> {
-        self.store.execute(&M::ddl(), &[]).await.map(|_| ())
+        self.store.define(&M::schema()).await
     }
 
     pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
@@ -111,61 +107,33 @@ impl<M: Model> Repository<M> {
             return Ok(());
         }
         self.ensure().await?;
-        let keyed = M::fields()
-            .iter()
-            .any(|field| matches!(field.kind.flat(), Type::Key));
-        if keyed {
-            let mut columns = Vec::new();
-            let mut params = Vec::new();
-            let mut groups = Vec::new();
-            for model in models.iter() {
-                let found = pairs(model);
-                if columns.is_empty() {
-                    columns = found.iter().map(|pair| format!("\"{}\"", pair.0)).collect();
-                }
-                groups.push(format!("({})", vec!["?"; found.len()].join(", ")));
-                params.extend(found.into_iter().map(|pair| pair.1));
-            }
-            let sql = format!(
-                "INSERT INTO \"{}\" ({}) VALUES {}",
-                M::table(),
-                columns.join(", "),
-                groups.join(", ")
-            );
-            self.store.execute(&sql, &params).await?;
-            return Ok(());
-        }
-        for model in models.iter_mut() {
-            let found = pairs(model);
-            let columns = found
-                .iter()
-                .map(|pair| pair.0.to_string())
-                .collect::<Vec<_>>();
-            let params = found.into_iter().map(|pair| pair.1).collect::<Vec<_>>();
-            let id = self
-                .store
-                .insert(M::table().as_str(), &columns, &params)
-                .await?;
-            model.set_id(Value::int(id));
+        let batch = models.iter().map(pairs).collect::<Vec<_>>();
+        let keys = self.store.create(&M::schema(), &batch).await?;
+        for (model, key) in models.iter_mut().zip(keys) {
+            model.set_id(key.value());
         }
         Ok(())
     }
 
     pub async fn get(&self, id: &Value) -> Result<Option<M>, StoreError> {
-        self.ensure().await?;
-        let sql = format!(
-            "SELECT * FROM \"{}\" WHERE \"{}\" = ?",
-            M::table(),
-            id_column::<M>()
-        );
-        let rows = self
-            .store
-            .fetch(&sql, std::slice::from_ref(id), &kinds::<M>())
+        let schema = M::schema();
+        let mut rows = self
+            .scan_query(&Query {
+                tree: Tree::Leaf(Filter {
+                    field: schema.key(),
+                    op: Op::Eq,
+                    value: id.clone(),
+                }),
+                sort: vec![Sort {
+                    field: schema.key(),
+                    order: Order::Asc,
+                }],
+                page: Page::all(),
+                only: Only::Lone,
+                mass: None,
+            })
             .await?;
-        rows.into_iter()
-            .next()
-            .map(|row| M::from_row(&row))
-            .transpose()
+        Ok(rows.pop())
     }
 
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
@@ -233,34 +201,14 @@ impl<M: Model> Repository<M> {
 
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
         self.ensure().await?;
-        let mut sets = Vec::new();
-        let mut params = Vec::new();
-        for (name, value) in pairs(model) {
-            sets.push(format!("\"{name}\" = ?"));
-            params.push(value);
-        }
-        params.push(model.id());
-        let sql = format!(
-            "UPDATE \"{}\" SET {} WHERE \"{}\" = ?",
-            M::table(),
-            sets.join(", "),
-            id_column::<M>()
-        );
-        self.store.execute(&sql, &params).await?;
-        Ok(())
+        self.store
+            .replace(&M::schema(), &Key::of(&model.id())?, &pairs(model))
+            .await
     }
 
     pub async fn delete(&self, id: &Value) -> Result<(), StoreError> {
         self.ensure().await?;
-        let sql = format!(
-            "DELETE FROM \"{}\" WHERE \"{}\" = ?",
-            M::table(),
-            id_column::<M>()
-        );
-        self.store
-            .execute(&sql, std::slice::from_ref(id))
-            .await
-            .map(|_| ())
+        self.store.remove(&M::schema(), &Key::of(id)?).await
     }
 }
 

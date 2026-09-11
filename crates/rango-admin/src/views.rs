@@ -124,7 +124,7 @@ pub(crate) async fn dashboard(
     let mut items = Vec::new();
     for model in models.0.iter() {
         let href = format!("{base}/{}/", model.table);
-        let _ = store.execute(&model.ddl(), &[]).await;
+        let _ = store.define(model).await;
         let total = store
             .total_query(
                 model,

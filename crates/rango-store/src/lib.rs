@@ -201,6 +201,27 @@ pub trait Store: Send + Sync + 'static {
         query: &'a Query,
     ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
+    fn define<'a>(&'a self, schema: &'a Schema) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    fn create<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<Vec<Key>, StoreError>>;
+
+    fn replace<'a>(
+        &'a self,
+        schema: &'a Schema,
+        key: &'a Key,
+        cells: &'a [(Name, Value)],
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    fn remove<'a>(
+        &'a self,
+        schema: &'a Schema,
+        key: &'a Key,
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
+
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 
     fn insert<'a>(
