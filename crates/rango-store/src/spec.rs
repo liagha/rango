@@ -158,7 +158,10 @@ pub struct Page {
 
 impl Page {
     pub fn all() -> Self {
-        Self { count: 0, offset: 0 }
+        Self {
+            count: 0,
+            offset: 0,
+        }
     }
 }
 
@@ -404,7 +407,7 @@ impl Schema {
     }
 }
 
-fn affinity(kind: &Type) -> ColumnKind {
+pub(crate) fn affinity(kind: &Type) -> ColumnKind {
     match kind {
         Type::Id | Type::Int | Type::Moment | Type::Bool => ColumnKind::Integer,
         Type::Float => ColumnKind::Real,

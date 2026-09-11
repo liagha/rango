@@ -214,9 +214,16 @@ impl<M: Model> Repository<M> {
     }
 
     pub async fn scan_query(&self, query: &Query) -> Result<Vec<M>, StoreError> {
-        self.ensure().await?;
-        let rows = self.store.scan_query(&M::schema(), query).await?;
+        if !matches!(query.only, Only::All) {
+            return Err(StoreError::Unsupported("projected rows need rows()".into()));
+        }
+        let rows = self.rows(query).await?;
         rows.iter().map(|row| M::from_row(row)).collect()
+    }
+
+    pub async fn rows(&self, query: &Query) -> Result<Vec<Row>, StoreError> {
+        self.ensure().await?;
+        self.store.scan_query(&M::schema(), query).await
     }
 
     pub async fn total_query(&self, query: &Query) -> Result<usize, StoreError> {

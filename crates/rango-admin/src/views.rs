@@ -8,8 +8,7 @@ use axum::{
 use rango::{
     Error, Repository, Response, Row, Store, Value,
     forgery::{Token, cookie},
-    model::{Field, Model, Only, Page, Query, Schema, Sort, Table, Type, key},
-    store::ColumnKind,
+    model::{Filter, Model, Only, Op, Order, Page, Query, Schema, Sort, Table, Tree, Type, key},
     view::{self, render},
 };
 use rango_auth::Current;
@@ -126,22 +125,23 @@ pub(crate) async fn dashboard(
     for model in models.0.iter() {
         let href = format!("{base}/{}/", model.table);
         let _ = store.execute(&model.ddl(), &[]).await;
-        let rows = store
-            .fetch(
-                &format!("SELECT COUNT(*) FROM \"{}\"", model.table),
-                &[],
-                &[ColumnKind::Integer],
+        let total = store
+            .total_query(
+                model,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
             )
             .await
             .unwrap_or_default();
-        let count = match rows.first().and_then(|row| row.get(0)) {
-            Some(Value::Int(number)) => number.to_string(),
-            _ => "0".into(),
-        };
         items.push(Entry {
             href,
             title: model.table.to_string(),
-            count,
+            count: total.to_string(),
         });
     }
     render(Dashboard { entries: items })
@@ -167,29 +167,31 @@ pub(crate) async fn list<M: Model>(
             let Some(other) = models.0.iter().find(|spec| spec.table == table) else {
                 continue;
             };
-            let display: Vec<&Field> = other
+            let display: Vec<Tree> = other
                 .fields
                 .iter()
                 .filter(|field| matches!(field.kind.flat(), Type::Str))
+                .map(|field| {
+                    Tree::Leaf(Filter {
+                        field: field.name,
+                        op: Op::Like,
+                        value: Value::str(format!("%{query}%")),
+                    })
+                })
                 .collect();
             if display.is_empty() {
                 continue;
             }
-            let term = format!("%{query}%");
-            let clause = display
-                .iter()
-                .map(|field| format!("LOWER(\"{}\") LIKE ?", field.name))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            let terms = display
-                .iter()
-                .map(|_| Value::str(&term))
-                .collect::<Vec<_>>();
             let rows = store
-                .fetch(
-                    &format!("SELECT * FROM \"{table}\" WHERE {clause}"),
-                    &terms,
-                    &other.kinds(),
+                .scan_query(
+                    other,
+                    &Query {
+                        tree: Tree::Or(display),
+                        sort: Vec::new(),
+                        page: Page::all(),
+                        only: Only::All,
+                        mass: None,
+                    },
                 )
                 .await
                 .unwrap_or_default();
@@ -348,15 +350,22 @@ pub(crate) async fn detail<M: Model>(
                 continue;
             }
             let rows = store
-                .fetch(
-                    &format!(
-                        "SELECT * FROM \"{}\" WHERE \"{}\" = ? ORDER BY \"{}\"",
-                        other.table,
-                        field.name,
-                        other.key()
-                    ),
-                    &[key::<M>(&id)],
-                    &other.kinds(),
+                .scan_query(
+                    other,
+                    &Query {
+                        tree: Tree::Leaf(Filter {
+                            field: field.name,
+                            op: Op::Eq,
+                            value: key::<M>(&id),
+                        }),
+                        sort: vec![Sort {
+                            field: other.key(),
+                            order: Order::Asc,
+                        }],
+                        page: Page::all(),
+                        only: Only::All,
+                        mass: None,
+                    },
                 )
                 .await
                 .unwrap_or_default();

@@ -7,8 +7,8 @@ use sea_orm::{
 };
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Only, Op, Order, Query, Row, Rows, Schema, Sort, Store,
-    StoreError, Tree, Value,
+    BoxFuture, Column, ColumnKind, Filter, Name, Only, Op, Order, Query, Row, Rows, Schema, Sort,
+    Store, StoreError, Tree, Value, spec::affinity,
 };
 
 pub struct Sqlite {
@@ -82,7 +82,7 @@ fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
     Ok(Row { values })
 }
 
-fn leaf(filter: &crate::Filter, params: &mut Vec<Value>) -> String {
+fn leaf(filter: &Filter, params: &mut Vec<Value>) -> String {
     match filter.op {
         Op::Eq => {
             params.push(filter.value.clone());
@@ -165,6 +165,15 @@ fn tree(node: &Tree, params: &mut Vec<Value>) -> String {
     }
 }
 
+fn kind_of(schema: &Schema, name: Name) -> Result<ColumnKind, StoreError> {
+    schema
+        .fields
+        .iter()
+        .find(|field| field.name == name)
+        .map(|field| affinity(&field.kind))
+        .ok_or_else(|| StoreError::Value(format!("unknown column {name}")))
+}
+
 fn sorts(sorts: &[Sort], schema: &Schema) -> String {
     if sorts.is_empty() {
         return format!("\"{}\"", schema.key());
@@ -243,9 +252,21 @@ impl Store for Sqlite {
             if query.mass.is_some() {
                 todo!("phase 3")
             }
-            let head = match query.only {
-                Only::All => "SELECT *".to_string(),
-                Only::Some(_) | Only::Lone => todo!("phase 2"),
+            let (head, kinds) = match &query.only {
+                Only::All | Only::Lone => ("SELECT *".to_string(), schema.kinds()),
+                Only::Some(names) if names.is_empty() => ("SELECT *".to_string(), schema.kinds()),
+                Only::Some(names) => {
+                    let mut kinds = Vec::with_capacity(names.len());
+                    for name in names {
+                        kinds.push(kind_of(&schema, *name)?);
+                    }
+                    let columns = names
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (format!("SELECT {columns}"), kinds)
+                }
             };
             let mut params = Vec::new();
             let mut sql = format!("{head} FROM \"{}\"", schema.table);
@@ -254,13 +275,14 @@ impl Store for Sqlite {
                 sql.push_str(&format!(" WHERE {cond}"));
             }
             sql.push_str(&format!(" ORDER BY {}", sorts(&query.sort, &schema)));
-            if query.page.count > 0 {
+            if matches!(query.only, Only::Lone) {
+                sql.push_str(" LIMIT 1");
+            } else if query.page.count > 0 {
                 sql.push_str(&format!(
                     " LIMIT {} OFFSET {}",
                     query.page.count, query.page.offset
                 ));
             }
-            let kinds = schema.kinds();
             let rows = self
                 .conn
                 .query_all(statement(&sql, &params))
@@ -388,11 +410,163 @@ impl Store for Sqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Field, Page, Table, Type};
+    use chrono::NaiveDate;
 
-    async fn store() -> Arc<dyn Store> {
-        let path = std::env::temp_dir().join(format!("rango-test-{}.sqlite", std::process::id()));
+    async fn open_db(name: &str) -> Arc<dyn Store> {
+        let path =
+            std::env::temp_dir().join(format!("rango-test-{}-{}.sqlite", std::process::id(), name));
         let _ = std::fs::remove_file(&path);
         open(&path).await.unwrap()
+    }
+
+    async fn store() -> Arc<dyn Store> {
+        open_db("base").await
+    }
+
+    fn schema() -> Schema {
+        Schema {
+            table: Table("w"),
+            fields: vec![
+                Field::id(),
+                Field::new("name", Type::Str),
+                Field::new("age", Type::Int.optional()),
+                Field::new("at", Type::Moment.optional()),
+            ],
+            rules: Vec::new(),
+        }
+    }
+
+    fn ask(tree: Tree) -> Query {
+        Query {
+            tree,
+            sort: Vec::new(),
+            page: Page::all(),
+            only: Only::All,
+            mass: None,
+        }
+    }
+
+    fn leaf(field: &'static str, op: Op, value: Value) -> Tree {
+        Tree::Leaf(Filter {
+            field: Name(field),
+            op,
+            value,
+        })
+    }
+
+    async fn seed() -> Arc<dyn Store> {
+        let db = open_db("trees").await;
+        db.execute(&schema().ddl(), &[]).await.unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15)
+            .unwrap()
+            .and_time(NaiveTime::MIN)
+            .and_utc();
+        let rows = vec![
+            (Value::str("ann"), Value::int(30), Value::datetime(day)),
+            (Value::str("bob"), Value::int(40), Value::Null),
+            (Value::str("ann"), Value::int(30), Value::datetime(day)),
+            (Value::str("zed"), Value::Null, Value::Null),
+        ];
+        for (name, age, at) in rows {
+            db.execute(
+                "INSERT INTO w (name, age, at) VALUES (?, ?, ?)",
+                &[name, age, at],
+            )
+            .await
+            .unwrap();
+        }
+        db
+    }
+
+    #[tokio::test]
+    async fn trees() {
+        let db = seed().await;
+        let schema = schema();
+        let total = |tree: Tree| {
+            let db = db.clone();
+            let schema = schema.clone();
+            async move { db.total_query(&schema, &ask(tree)).await.unwrap() }
+        };
+        assert_eq!(total(Tree::And(Vec::new())).await, 4);
+        assert_eq!(total(leaf("name", Op::Eq, Value::str("ann"))).await, 2);
+        assert_eq!(total(leaf("name", Op::Like, Value::str("%ann%"))).await, 2);
+        assert_eq!(
+            total(Tree::Or(vec![
+                leaf("name", Op::Eq, Value::str("ann")),
+                leaf("age", Op::Eq, Value::int(40)),
+            ]))
+            .await,
+            3
+        );
+        assert_eq!(
+            total(Tree::Cut(Box::new(leaf("name", Op::Eq, Value::str("ann"))))).await,
+            2
+        );
+        assert_eq!(total(leaf("name", Op::Ne, Value::str("bob"))).await, 3);
+        assert_eq!(total(leaf("age", Op::More, Value::int(30))).await, 1);
+        assert_eq!(total(leaf("age", Op::Less, Value::int(40))).await, 2);
+        assert_eq!(total(leaf("age", Op::Bare, Value::Null)).await, 1);
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15)
+            .unwrap()
+            .and_time(NaiveTime::MIN)
+            .and_utc();
+        assert_eq!(total(leaf("at", Op::At, Value::datetime(day))).await, 2);
+        let rows = db
+            .scan_query(
+                &schema,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: vec![Sort {
+                        field: Name("age"),
+                        order: Order::Desc,
+                    }],
+                    page: Page {
+                        count: 2,
+                        offset: 0,
+                    },
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].str(1).unwrap(), "bob");
+        let rows = db
+            .scan_query(
+                &schema,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::Some(vec![Name("name")]),
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.values.len() == 1));
+        assert_eq!(rows[0].str(0).unwrap(), "ann");
+        let rows = db
+            .scan_query(
+                &schema,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: vec![Sort {
+                        field: Name("name"),
+                        order: Order::Asc,
+                    }],
+                    page: Page::all(),
+                    only: Only::Lone,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].str(1).unwrap(), "ann");
     }
 
     #[tokio::test]
