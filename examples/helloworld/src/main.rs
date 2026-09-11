@@ -173,16 +173,9 @@ async fn main() -> ExitCode {
         }
     }
     hint(&store).await;
-    let secret = match std::env::var("RANGO_SECRET") {
-        Ok(secret) => secret,
-        Err(_) => {
-            eprintln!("error: set RANGO_SECRET to a long random value");
-            return ExitCode::FAILURE;
-        }
-    };
-    let settings = Settings::new()
-        .base_dir(env!("CARGO_MANIFEST_DIR"))
-        .secret(&secret);
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let secret = rango::settings::key(dir);
+    let settings = Settings::new().base_dir(dir).secret(&secret);
     let auth = rango_auth::Auth::new(&secret).signup(true);
     let panel = rango_admin::Admin::new()
         .model::<Message>()
