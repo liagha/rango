@@ -1,49 +1,60 @@
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-pub fn key(dir: impl AsRef<Path>) -> String {
-    if let Ok(secret) = std::env::var("RANGO_SECRET")
-        && !secret.is_empty()
+use crate::{ColumnKind, Store, Value};
+
+pub async fn key(store: &dyn Store) -> String {
+    if store
+        .execute(
+            "CREATE TABLE IF NOT EXISTS setting (name TEXT PRIMARY KEY, value TEXT)",
+            &[],
+        )
+        .await
+        .is_err()
     {
+        return ephemeral("no setting table");
+    }
+    if let Some(secret) = read(store).await {
         return secret;
     }
-    let path = dir.as_ref().join(".rango-secret");
-    if let Some(secret) = load(&path) {
-        return secret;
-    }
-    save(&path)
-}
-
-fn load(path: &Path) -> Option<String> {
-    let secret = std::fs::read_to_string(path).ok()?;
-    let secret = secret.trim().to_string();
-    if secret.is_empty() {
-        None
-    } else {
-        Some(secret)
+    let secret = fresh();
+    let _ = store
+        .execute(
+            "INSERT OR IGNORE INTO setting (name, value) VALUES ('secret', ?)",
+            &[Value::str(secret.clone())],
+        )
+        .await;
+    match read(store).await {
+        Some(secret) => secret,
+        None => ephemeral("no secret row"),
     }
 }
 
-fn save(path: &Path) -> String {
-    let secret = format!(
+async fn read(store: &dyn Store) -> Option<String> {
+    let rows = store
+        .fetch(
+            "SELECT value FROM setting WHERE name = 'secret'",
+            &[],
+            &[ColumnKind::Text],
+        )
+        .await
+        .ok()?;
+    match rows.first()?.get(0)? {
+        Value::Str(secret) if !secret.is_empty() => Some(secret.clone()),
+        _ => None,
+    }
+}
+
+fn fresh() -> String {
+    format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
-    );
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    opts.mode(0o600);
-    match opts
-        .open(path)
-        .and_then(|mut file| file.write_all(secret.as_bytes()))
-    {
-        Ok(()) => tracing::warn!("generated {}", path.display()),
-        Err(fail) => tracing::warn!("ephemeral secret: {fail}"),
-    }
-    secret
+    )
+}
+
+fn ephemeral(why: &str) -> String {
+    tracing::warn!("ephemeral secret: {why}");
+    fresh()
 }
 
 pub struct Settings {
@@ -100,19 +111,19 @@ impl Default for Settings {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    use crate::store::sqlite;
 
-    #[test]
-    fn roundtrip() {
-        let dir = std::env::temp_dir().join(format!("rango-key-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(".rango-secret");
-        let secret = save(&path);
-        assert_eq!(secret.len(), 64);
-        assert_eq!(load(&path), Some(secret));
-        let _ = std::fs::remove_dir_all(&dir);
+    #[tokio::test]
+    async fn keeps() {
+        let path = std::env::temp_dir().join(format!("rango-secret-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = sqlite::open(&path).await.unwrap();
+        let first = key(store.as_ref()).await;
+        assert_eq!(first.len(), 64);
+        assert_eq!(key(store.as_ref()).await, first);
+        let _ = std::fs::remove_file(&path);
     }
 }

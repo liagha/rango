@@ -174,7 +174,7 @@ async fn main() -> ExitCode {
     }
     hint(&store).await;
     let dir = env!("CARGO_MANIFEST_DIR");
-    let secret = rango::settings::key(dir);
+    let secret = rango::settings::key(store.as_ref()).await;
     let settings = Settings::new().base_dir(dir).secret(&secret);
     let auth = rango_auth::Auth::new(&secret).signup(true);
     let panel = rango_admin::Admin::new()
