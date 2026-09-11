@@ -199,6 +199,11 @@ impl<M: Model> Repository<M> {
         self.store.total_query(&M::schema(), query).await
     }
 
+    pub async fn mass(&self, query: &Query) -> Result<Value, StoreError> {
+        self.ensure().await?;
+        self.store.mass(&M::schema(), query).await
+    }
+
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
         self.ensure().await?;
         self.store

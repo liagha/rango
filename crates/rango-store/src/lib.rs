@@ -222,6 +222,18 @@ pub trait Store: Send + Sync + 'static {
         key: &'a Key,
     ) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    fn evolve<'a>(
+        &'a self,
+        schema: &'a Schema,
+        drop: bool,
+    ) -> BoxFuture<'a, Result<usize, StoreError>>;
+
+    fn mass<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<Value, StoreError>>;
+
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 
     fn insert<'a>(

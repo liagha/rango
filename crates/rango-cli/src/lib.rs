@@ -120,28 +120,7 @@ pub async fn migrate(
 ) -> Result<usize, StoreError> {
     let mut done = 0;
     for schema in schemas {
-        store.execute(&schema.ddl(), &[]).await?;
-        done += 1;
-        match store.columns(schema.table.as_str()).await {
-            Ok(have) => {
-                for sql in schema.rename(&have) {
-                    store.execute(&sql, &[]).await?;
-                    done += 1;
-                }
-                for sql in schema.alter(&have) {
-                    store.execute(&sql, &[]).await?;
-                    done += 1;
-                }
-                if drop {
-                    for sql in schema.drop(&have) {
-                        store.execute(&sql, &[]).await?;
-                        done += 1;
-                    }
-                }
-            }
-            Err(StoreError::Unsupported(_)) => {}
-            Err(fail) => return Err(fail),
-        }
+        done += store.evolve(schema, drop).await?;
     }
     Ok(done)
 }

@@ -7,8 +7,8 @@ use sea_orm::{
 };
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Filter, Key, Name, Only, Op, Order, Query, Row, Rows, Schema,
-    Sort, Store, StoreError, Tree, Type, Value, spec::affinity,
+    BoxFuture, Column, ColumnKind, Filter, Key, Mass, Name, Only, Op, Order, Query, Row, Rows,
+    Schema, Sort, Store, StoreError, Tree, Type, Value, spec::affinity,
 };
 
 pub struct Sqlite {
@@ -250,7 +250,7 @@ impl Store for Sqlite {
         let query = query.clone();
         Box::pin(async move {
             if query.mass.is_some() {
-                todo!("phase 3")
+                return Err(StoreError::Unsupported("mass needs mass()".into()));
             }
             let (head, kinds) = match &query.only {
                 Only::All | Only::Lone => ("SELECT *".to_string(), schema.kinds()),
@@ -301,7 +301,7 @@ impl Store for Sqlite {
         let query = query.clone();
         Box::pin(async move {
             if query.mass.is_some() {
-                todo!("phase 3")
+                return Err(StoreError::Unsupported("mass needs mass()".into()));
             }
             let mut params = Vec::new();
             let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", schema.table);
@@ -433,6 +433,76 @@ impl Store for Sqlite {
             );
             self.execute(&sql, std::slice::from_ref(&key)).await?;
             Ok(())
+        })
+    }
+
+    fn evolve<'a>(
+        &'a self,
+        schema: &'a Schema,
+        drop: bool,
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        Box::pin(async move {
+            let mut done = 0;
+            self.define(&schema).await?;
+            done += 1;
+            let have = self.columns(schema.table.as_str()).await?;
+            for sql in schema.rename(&have) {
+                self.execute(&sql, &[]).await?;
+                done += 1;
+            }
+            for sql in schema.alter(&have) {
+                self.execute(&sql, &[]).await?;
+                done += 1;
+            }
+            if drop {
+                for sql in schema.drop(&have) {
+                    self.execute(&sql, &[]).await?;
+                    done += 1;
+                }
+            }
+            Ok(done)
+        })
+    }
+
+    fn mass<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<Value, StoreError>> {
+        let schema = schema.clone();
+        let query = query.clone();
+        Box::pin(async move {
+            let mass = match query.mass {
+                Some(mass) => mass,
+                None => return Err(StoreError::Unsupported("mass needs a mass".into())),
+            };
+            let (head, kinds) = match mass {
+                Mass::Count => ("COUNT(*)".to_string(), vec![ColumnKind::Integer]),
+                Mass::Sum(name) => (format!("SUM(\"{name}\")"), vec![kind_of(&schema, name)?]),
+                Mass::Mean(name) => (format!("AVG(\"{name}\")"), vec![ColumnKind::Real]),
+                Mass::Low(name) => (format!("MIN(\"{name}\")"), vec![kind_of(&schema, name)?]),
+                Mass::High(name) => (format!("MAX(\"{name}\")"), vec![kind_of(&schema, name)?]),
+            };
+            let mut params = Vec::new();
+            let mut sql = format!("SELECT {head} FROM \"{}\"", schema.table);
+            let cond = tree(&query.tree, &mut params);
+            if !cond.is_empty() {
+                sql.push_str(&format!(" WHERE {cond}"));
+            }
+            let rows = self
+                .conn
+                .query_all(statement(&sql, &params))
+                .await
+                .map_err(sql_err)?;
+            let rows: Vec<Row> = rows
+                .iter()
+                .map(|row| read(row, &kinds))
+                .collect::<Result<_, _>>()?;
+            Ok(rows
+                .first()
+                .and_then(|row| row.get(0).cloned())
+                .unwrap_or(Value::Null))
         })
     }
 
@@ -734,6 +804,112 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn evolves() {
+        let db = open_db("evolves").await;
+        let one = Schema {
+            table: Table("e"),
+            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            rules: Vec::new(),
+        };
+        assert_eq!(db.evolve(&one, false).await.unwrap(), 1);
+        assert_eq!(db.evolve(&one, false).await.unwrap(), 1);
+        let two = Schema {
+            table: Table("e"),
+            fields: vec![
+                Field::id(),
+                Field::new("name", Type::Str),
+                Field::new("age", Type::Int.optional()),
+            ],
+            rules: Vec::new(),
+        };
+        assert_eq!(db.evolve(&two, false).await.unwrap(), 2);
+        let names = db
+            .columns("e")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|col| col.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"age".to_string()));
+        assert_eq!(db.evolve(&one, false).await.unwrap(), 1);
+        assert_eq!(db.evolve(&one, true).await.unwrap(), 2);
+        let names = db
+            .columns("e")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|col| col.name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"age".to_string()));
+    }
+
+    #[tokio::test]
+    async fn masses() {
+        let db = open_db("masses").await;
+        let schema = Schema {
+            table: Table("g"),
+            fields: vec![
+                Field::id(),
+                Field::new("name", Type::Str),
+                Field::new("age", Type::Int.optional()),
+            ],
+            rules: Vec::new(),
+        };
+        db.define(&schema).await.unwrap();
+        for (name, age) in [
+            (Value::str("ann"), Value::int(30)),
+            (Value::str("bob"), Value::int(40)),
+            (Value::str("cid"), Value::Null),
+        ] {
+            db.execute("INSERT INTO g (name, age) VALUES (?, ?)", &[name, age])
+                .await
+                .unwrap();
+        }
+        let mass = |mass: Mass, tree: Tree| {
+            let db = db.clone();
+            let schema = schema.clone();
+            async move {
+                db.mass(
+                    &schema,
+                    &Query {
+                        tree,
+                        sort: Vec::new(),
+                        page: Page::all(),
+                        only: Only::All,
+                        mass: Some(mass),
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            mass(Mass::Count, Tree::And(Vec::new())).await,
+            Value::int(3)
+        );
+        assert_eq!(
+            mass(Mass::Count, leaf("name", Op::Eq, Value::str("ann"))).await,
+            Value::int(1)
+        );
+        assert_eq!(
+            mass(Mass::Sum(Name("age")), Tree::And(Vec::new())).await,
+            Value::int(70)
+        );
+        assert_eq!(
+            mass(Mass::Low(Name("age")), Tree::And(Vec::new())).await,
+            Value::int(30)
+        );
+        assert_eq!(
+            mass(Mass::High(Name("age")), Tree::And(Vec::new())).await,
+            Value::int(40)
+        );
+        match mass(Mass::Mean(Name("age")), Tree::And(Vec::new())).await {
+            Value::Float(mean) => assert!((mean - 35.0).abs() < 0.001),
+            _ => panic!("not a mean"),
+        }
     }
 
     #[tokio::test]
