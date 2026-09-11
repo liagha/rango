@@ -272,7 +272,7 @@ impl<M: Model> Repository<M> {
     }
 
     pub async fn scan_query(&self, query: &Query) -> Result<Vec<M>, StoreError> {
-        if !matches!(query.only, Only::All) {
+        if matches!(query.only, Only::Some(_)) {
             return Err(StoreError::Unsupported("projected rows need rows()".into()));
         }
         let rows = self.rows(query).await?;
@@ -440,5 +440,32 @@ mod tests {
         assert_eq!(Key::parse("7", &Post::spec()).value(), Value::int(7));
         assert_eq!(Key::parse("7", &Product::spec()).value(), Value::str("7"));
         assert_eq!(Key::parse("x", &Post::spec()).value(), Value::str("x"));
+    }
+
+    #[tokio::test]
+    async fn gets() {
+        let path =
+            std::env::temp_dir().join(format!("rango-test-{}-gets.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::store::sqlite::open(&path).await.unwrap();
+        let repo = Repository::<Post>::new(store);
+        let mut post = Post {
+            id: 0,
+            title: "hello".into(),
+        };
+        repo.save(&mut post).await.unwrap();
+        let found = repo.get(&Value::int(post.id)).await.unwrap().unwrap();
+        assert_eq!(found.title, "hello");
+        assert!(repo.get(&Value::int(999)).await.unwrap().is_none());
+        let projected = repo
+            .scan_query(&Query {
+                tree: Tree::And(Vec::new()),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![Name("title")]),
+                mass: None,
+            })
+            .await;
+        assert!(matches!(projected, Err(StoreError::Unsupported(_))));
     }
 }
