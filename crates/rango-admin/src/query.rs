@@ -1,20 +1,19 @@
 use std::collections::HashMap;
 
 use rango::chrono::{NaiveDate, NaiveTime};
-use rango::model::{Field, Type};
+use rango::model::{Field, Filter, Op, Tree, Type};
 use rango::store::Value;
 
 pub(crate) const PAGE: usize = 25;
 
-pub(crate) fn cond(
+pub(crate) fn tree(
     fields: &[Field],
     params: &HashMap<String, String>,
-    query: &str,
+    text: &str,
     find: &[usize],
     related: &HashMap<usize, Vec<String>>,
-) -> (String, Vec<Value>) {
+) -> Tree {
     let mut parts = Vec::new();
-    let mut values = Vec::new();
     for field in fields.iter() {
         if field.kind == Type::Id {
             continue;
@@ -27,81 +26,79 @@ pub(crate) fn cond(
             continue;
         }
         match field.kind.flat() {
-            Type::Str | Type::Key => {
-                parts.push(format!("LOWER(\"{}\") LIKE ?", field.name));
-                values.push(Value::str(format!("%{}%", raw.to_lowercase())));
-            }
+            Type::Str | Type::Key => parts.push(Tree::Leaf(Filter {
+                field: field.name,
+                op: Op::Like,
+                value: Value::str(format!("%{}%", raw.to_lowercase())),
+            })),
             Type::Decimal => match raw.parse::<rango::decimal::Decimal>() {
-                Ok(number) => {
-                    parts.push(format!("\"{}\" = ?", field.name));
-                    values.push(Value::decimal(number));
-                }
-                Err(_) => return ("1 = 0".into(), Vec::new()),
+                Ok(number) => parts.push(Tree::Leaf(Filter {
+                    field: field.name,
+                    op: Op::Eq,
+                    value: Value::decimal(number),
+                })),
+                Err(_) => return Tree::Or(Vec::new()),
             },
             Type::Int => match raw.parse::<i64>() {
-                Ok(number) => {
-                    parts.push(format!("\"{}\" = ?", field.name));
-                    values.push(Value::int(number));
-                }
-                Err(_) => return ("1 = 0".into(), Vec::new()),
+                Ok(number) => parts.push(Tree::Leaf(Filter {
+                    field: field.name,
+                    op: Op::Eq,
+                    value: Value::int(number),
+                })),
+                Err(_) => return Tree::Or(Vec::new()),
             },
             Type::Float => match raw.parse::<f64>() {
-                Ok(number) => {
-                    parts.push(format!("\"{}\" = ?", field.name));
-                    values.push(Value::float(number));
-                }
-                Err(_) => return ("1 = 0".into(), Vec::new()),
+                Ok(number) => parts.push(Tree::Leaf(Filter {
+                    field: field.name,
+                    op: Op::Eq,
+                    value: Value::float(number),
+                })),
+                Err(_) => return Tree::Or(Vec::new()),
             },
-            Type::Bool => {
-                parts.push(format!("\"{}\" = ?", field.name));
-                values.push(Value::bool(matches!(raw, "1" | "true" | "on" | "yes")));
-            }
+            Type::Bool => parts.push(Tree::Leaf(Filter {
+                field: field.name,
+                op: Op::Eq,
+                value: Value::bool(matches!(raw, "1" | "true" | "on" | "yes")),
+            })),
             Type::Moment => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-                Ok(day) => {
-                    let start = day.and_time(NaiveTime::MIN).and_utc();
-                    let end = day
-                        .succ_opt()
-                        .map(|next| next.and_time(NaiveTime::MIN).and_utc());
-                    match end {
-                        Some(end) => {
-                            parts.push(format!(
-                                "\"{}\" >= ? AND \"{}\" < ?",
-                                field.name, field.name
-                            ));
-                            values.push(Value::datetime(start));
-                            values.push(Value::datetime(end));
-                        }
-                        None => return ("1 = 0".into(), Vec::new()),
-                    }
-                }
-                Err(_) => return ("1 = 0".into(), Vec::new()),
+                Ok(day) => parts.push(Tree::Leaf(Filter {
+                    field: field.name,
+                    op: Op::At,
+                    value: Value::datetime(day.and_time(NaiveTime::MIN).and_utc()),
+                })),
+                Err(_) => return Tree::Or(Vec::new()),
             },
             _ => {}
         }
     }
-    if !query.is_empty() {
+    if !text.is_empty() {
         let mut search = Vec::new();
-        let mut terms = Vec::new();
         for &i in find {
-            search.push(format!("LOWER(\"{}\") LIKE ?", fields[i].name));
-            terms.push(Value::str(format!("%{query}%")));
+            search.push(Tree::Leaf(Filter {
+                field: fields[i].name,
+                op: Op::Like,
+                value: Value::str(format!("%{text}%")),
+            }));
         }
         for (i, ids) in related {
             if ids.is_empty() {
                 continue;
             }
-            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-            search.push(format!("\"{}\" IN ({marks})", fields[*i].name));
+            let mut ors = Vec::new();
             for id in ids {
-                terms.push(Value::str(id));
+                ors.push(Tree::Leaf(Filter {
+                    field: fields[*i].name,
+                    op: Op::Eq,
+                    value: Value::str(id),
+                }));
             }
+            search.push(Tree::Or(ors));
         }
         if !search.is_empty() {
-            parts.push(format!("({})", search.join(" OR ")));
-            values.extend(terms);
+            parts.push(Tree::Or(search));
         }
     }
-    (parts.join(" AND "), values)
+    Tree::And(parts)
 }
 
 pub(crate) fn encode(params: &HashMap<String, String>, skip: &[&str]) -> String {
@@ -146,11 +143,18 @@ mod tests {
     fn search() {
         let fields = fields();
         let params = HashMap::new();
-        let (clause, terms) = cond(&fields, &params, "ann", &[1], &HashMap::new());
-        assert!(clause.contains("LIKE"));
-        assert_eq!(terms, vec![Value::str("%ann%")]);
-        let (clause, _) = cond(&fields, &params, "", &[1], &HashMap::new());
-        assert!(clause.is_empty());
+        assert_eq!(
+            tree(&fields, &params, "ann", &[1], &HashMap::new()),
+            Tree::And(vec![Tree::Or(vec![Tree::Leaf(Filter {
+                field: fields[1].name,
+                op: Op::Like,
+                value: Value::str("%ann%"),
+            })])])
+        );
+        assert_eq!(
+            tree(&fields, &params, "", &[1], &HashMap::new()),
+            Tree::And(Vec::new())
+        );
     }
 
     #[test]
@@ -158,16 +162,35 @@ mod tests {
         let fields = fields();
         let mut params = HashMap::new();
         params.insert("name".into(), "an".into());
-        let (clause, terms) = cond(&fields, &params, "", &[1], &HashMap::new());
-        assert!(clause.contains("LIKE"));
-        assert_eq!(terms, vec![Value::str("%an%")]);
+        assert_eq!(
+            tree(&fields, &params, "", &[1], &HashMap::new()),
+            Tree::And(vec![Tree::Leaf(Filter {
+                field: fields[1].name,
+                op: Op::Like,
+                value: Value::str("%an%"),
+            })])
+        );
         params.insert("age".into(), "30".into());
-        let (clause, terms) = cond(&fields, &params, "", &[1], &HashMap::new());
-        assert!(clause.contains("AND"));
-        assert_eq!(terms.len(), 2);
+        assert_eq!(
+            tree(&fields, &params, "", &[1], &HashMap::new()),
+            Tree::And(vec![
+                Tree::Leaf(Filter {
+                    field: fields[1].name,
+                    op: Op::Like,
+                    value: Value::str("%an%"),
+                }),
+                Tree::Leaf(Filter {
+                    field: fields[2].name,
+                    op: Op::Eq,
+                    value: Value::int(30),
+                }),
+            ])
+        );
         params.insert("age".into(), "bad".into());
-        let (clause, _) = cond(&fields, &params, "", &[1], &HashMap::new());
-        assert_eq!(clause, "1 = 0");
+        assert_eq!(
+            tree(&fields, &params, "", &[1], &HashMap::new()),
+            Tree::Or(Vec::new())
+        );
     }
 
     #[test]

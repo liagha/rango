@@ -1,5 +1,11 @@
+pub mod spec;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+
+pub use spec::{
+    Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule, Schema,
+    Sort, Table, Tree, Type,
+};
 
 use std::{fmt, future::Future, pin::Pin};
 
@@ -182,6 +188,18 @@ pub trait Store: Send + Sync + 'static {
         let _ = table;
         Box::pin(async { Err(StoreError::Unsupported("columns".into())) })
     }
+
+    fn scan_query<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<Rows, StoreError>>;
+
+    fn total_query<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 

@@ -2,13 +2,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use askama::Template;
 use axum::{
-    extract::{Extension, Form, OriginalUri, Path, Query},
+    extract::{Extension, Form, OriginalUri, Path, Query as Params},
     http::{HeaderMap, Uri},
 };
 use rango::{
     Error, Repository, Response, Row, Store, Value,
     forgery::{Token, cookie},
-    model::{Field, Model, Schema, Table, Type, key},
+    model::{Field, Model, Only, Page, Query, Schema, Sort, Table, Type, key},
     store::ColumnKind,
     view::{self, render},
 };
@@ -16,7 +16,7 @@ use rango_auth::Current;
 
 use super::form::{filter_input, input, input_raw, locked, value};
 use super::history::{Action, History, log};
-use super::query::{PAGE, cond, encode, here, href};
+use super::query::{PAGE, encode, here, href, tree};
 use super::row::{cell, id_of, locate, text, when, with_id};
 
 #[derive(Template)]
@@ -151,7 +151,7 @@ pub(crate) async fn list<M: Model>(
     repository: Repository<M>,
     store: Extension<Arc<dyn Store>>,
     models: Extension<Arc<Vec<Schema>>>,
-    Query(params): Query<HashMap<String, String>>,
+    Params(params): Params<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
     let at = locate(&M::columns(), &fields);
@@ -201,8 +201,17 @@ pub(crate) async fn list<M: Model>(
             related.insert(i, rows.iter().map(|row| text(row.values.get(pk))).collect());
         }
     }
-    let (clause, terms) = cond(&fields, &params, &query, &find, &related);
-    let total = repository.total(&clause, &terms).await?;
+    let pick = tree(&fields, &params, &query, &find, &related);
+    let schema = M::schema();
+    let total = repository
+        .total_query(&Query {
+            tree: pick,
+            sort: Vec::new(),
+            page: Page::all(),
+            only: Only::All,
+            mass: None,
+        })
+        .await?;
     let pages = total.div_ceil(PAGE);
     let page = params
         .get("page")
@@ -211,7 +220,16 @@ pub(crate) async fn list<M: Model>(
         .clamp(1, pages.max(1));
     let offset = (page - 1) * PAGE;
     let rows: Vec<Vec<Value>> = repository
-        .scan(&clause, &terms, &sort, Some((PAGE, offset)))
+        .scan_query(&Query {
+            tree: tree(&fields, &params, &query, &find, &related),
+            sort: vec![Sort::parse(&sort, &schema)],
+            page: Page {
+                count: PAGE,
+                offset,
+            },
+            only: Only::All,
+            mass: None,
+        })
         .await?
         .iter()
         .map(|model| with_id(model, &fields))
@@ -250,7 +268,10 @@ pub(crate) async fn list<M: Model>(
         .map(|field| {
             filter_input(
                 field,
-                params.get(field.name.as_str()).map(String::as_str).unwrap_or(""),
+                params
+                    .get(field.name.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(""),
             )
         })
         .collect();
@@ -281,7 +302,7 @@ pub(crate) async fn detail<M: Model>(
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    Params(params): Params<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let model = repository
         .get(&key::<M>(&id))
@@ -423,7 +444,10 @@ pub(crate) async fn create<M: Model>(
             values.push(field.default.clone().unwrap_or(Value::Null));
             continue;
         }
-        let raw = map.get(field.name.as_str()).map(String::as_str).unwrap_or("");
+        let raw = map
+            .get(field.name.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
         inputs.push(input_raw(field, raw));
         match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
@@ -447,14 +471,7 @@ pub(crate) async fn create<M: Model>(
     }
     let mut model = M::from_row(&Row { values })?;
     repository.save(&mut model).await?;
-    log(
-        &history,
-        M::table(),
-        &model.id(),
-        Action::Create,
-        &current,
-    )
-    .await;
+    log(&history, M::table(), &model.id(), Action::Create, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 
@@ -530,7 +547,10 @@ pub(crate) async fn replace<M: Model>(
             values.push(old.cloned().unwrap_or(Value::Null));
             continue;
         }
-        let raw = map.get(field.name.as_str()).map(String::as_str).unwrap_or("");
+        let raw = map
+            .get(field.name.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
         inputs.push(input_raw(field, raw));
         match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
@@ -554,14 +574,7 @@ pub(crate) async fn replace<M: Model>(
     }
     let model = M::from_row(&Row { values })?;
     repository.update(&model).await?;
-    log(
-        &history,
-        M::table(),
-        &key::<M>(&id),
-        Action::Edit,
-        &current,
-    )
-    .await;
+    log(&history, M::table(), &key::<M>(&id), Action::Edit, &current).await;
     Ok(view::redirect(&back(&uri, 1)))
 }
 

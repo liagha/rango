@@ -1,11 +1,15 @@
 use std::{path::Path, sync::Arc};
 
+use chrono::{NaiveTime, TimeDelta};
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, QueryResult, Statement,
     Value as SeaValue,
 };
 
-use crate::{BoxFuture, Column, ColumnKind, Row, Rows, Store, StoreError, Value};
+use crate::{
+    BoxFuture, Column, ColumnKind, Only, Op, Order, Query, Row, Rows, Schema, Sort, Store,
+    StoreError, Tree, Value,
+};
 
 pub struct Sqlite {
     conn: DatabaseConnection,
@@ -78,6 +82,103 @@ fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
     Ok(Row { values })
 }
 
+fn leaf(filter: &crate::Filter, params: &mut Vec<Value>) -> String {
+    match filter.op {
+        Op::Eq => {
+            params.push(filter.value.clone());
+            format!("\"{}\" = ?", filter.field)
+        }
+        Op::Ne => {
+            params.push(filter.value.clone());
+            format!("\"{}\" != ?", filter.field)
+        }
+        Op::More => {
+            params.push(filter.value.clone());
+            format!("\"{}\" > ?", filter.field)
+        }
+        Op::Less => {
+            params.push(filter.value.clone());
+            format!("\"{}\" < ?", filter.field)
+        }
+        Op::Like => {
+            params.push(filter.value.clone());
+            format!("LOWER(\"{}\") LIKE ?", filter.field)
+        }
+        Op::Bare => format!("\"{}\" IS NULL", filter.field),
+        Op::At => match &filter.value {
+            Value::DateTime(at) => {
+                let start = at.date_naive().and_time(NaiveTime::MIN).and_utc();
+                let end = start + TimeDelta::days(1);
+                params.push(Value::datetime(start));
+                params.push(Value::datetime(end));
+                format!("\"{}\" >= ? AND \"{}\" < ?", filter.field, filter.field)
+            }
+            _ => "1 = 0".into(),
+        },
+        Op::In | Op::Out => todo!("phase 2"),
+    }
+}
+
+fn tree(node: &Tree, params: &mut Vec<Value>) -> String {
+    match node {
+        Tree::Leaf(filter) => leaf(filter, params),
+        Tree::And(parts) => {
+            let mut out = Vec::new();
+            for node in parts {
+                let cond = tree(node, params);
+                if !cond.is_empty() {
+                    out.push(cond);
+                }
+            }
+            if out.len() == 1 {
+                out.pop().unwrap_or_default()
+            } else if out.is_empty() {
+                String::new()
+            } else {
+                format!("({})", out.join(" AND "))
+            }
+        }
+        Tree::Or(parts) => {
+            let mut out = Vec::new();
+            for node in parts {
+                let cond = tree(node, params);
+                if !cond.is_empty() {
+                    out.push(cond);
+                }
+            }
+            if out.len() == 1 {
+                out.pop().unwrap_or_default()
+            } else if out.is_empty() {
+                "1 = 0".into()
+            } else {
+                format!("({})", out.join(" OR "))
+            }
+        }
+        Tree::Cut(inner) => {
+            let cond = tree(inner, params);
+            if cond.is_empty() {
+                "1 = 1".into()
+            } else {
+                format!("NOT ({cond})")
+            }
+        }
+    }
+}
+
+fn sorts(sorts: &[Sort], schema: &Schema) -> String {
+    if sorts.is_empty() {
+        return format!("\"{}\"", schema.key());
+    }
+    sorts
+        .iter()
+        .map(|sort| match sort.order {
+            Order::Asc => format!("\"{}\"", sort.field),
+            Order::Desc => format!("\"{}\" DESC", sort.field),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn statement(sql: &str, params: &[Value]) -> Statement {
     Statement::from_sql_and_values(DbBackend::Sqlite, sql, bind(params))
 }
@@ -128,6 +229,76 @@ impl Store for Sqlite {
                 .await
                 .map_err(sql_err)?;
             rows.iter().map(|row| read(row, &kinds)).collect()
+        })
+    }
+
+    fn scan_query<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<Rows, StoreError>> {
+        let schema = schema.clone();
+        let query = query.clone();
+        Box::pin(async move {
+            if query.mass.is_some() {
+                todo!("phase 3")
+            }
+            let head = match query.only {
+                Only::All => "SELECT *".to_string(),
+                Only::Some(_) | Only::Lone => todo!("phase 2"),
+            };
+            let mut params = Vec::new();
+            let mut sql = format!("{head} FROM \"{}\"", schema.table);
+            let cond = tree(&query.tree, &mut params);
+            if !cond.is_empty() {
+                sql.push_str(&format!(" WHERE {cond}"));
+            }
+            sql.push_str(&format!(" ORDER BY {}", sorts(&query.sort, &schema)));
+            if query.page.count > 0 {
+                sql.push_str(&format!(
+                    " LIMIT {} OFFSET {}",
+                    query.page.count, query.page.offset
+                ));
+            }
+            let kinds = schema.kinds();
+            let rows = self
+                .conn
+                .query_all(statement(&sql, &params))
+                .await
+                .map_err(sql_err)?;
+            rows.iter().map(|row| read(row, &kinds)).collect()
+        })
+    }
+
+    fn total_query<'a>(
+        &'a self,
+        schema: &'a Schema,
+        query: &'a Query,
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        let query = query.clone();
+        Box::pin(async move {
+            if query.mass.is_some() {
+                todo!("phase 3")
+            }
+            let mut params = Vec::new();
+            let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", schema.table);
+            let cond = tree(&query.tree, &mut params);
+            if !cond.is_empty() {
+                sql.push_str(&format!(" WHERE {cond}"));
+            }
+            let rows = self
+                .conn
+                .query_all(statement(&sql, &params))
+                .await
+                .map_err(sql_err)?;
+            match rows.first() {
+                Some(row) => match row.try_get_by_index::<Option<i64>>(0) {
+                    Ok(Some(total)) => Ok(total as usize),
+                    _ => Err(StoreError::Value("no total".into())),
+                },
+                None => Err(StoreError::Value("no total".into())),
+            }
         })
     }
 
