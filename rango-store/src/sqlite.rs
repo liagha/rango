@@ -505,7 +505,7 @@ async fn run_create(
             params.extend(cells.iter().map(|pair| pair.1.clone()));
         }
         let sql = format!(
-            "INSERT INTO \"{}\" ({columns}) VALUES {}",
+            "INSERT OR REPLACE INTO \"{}\" ({columns}) VALUES {}",
             schema.table,
             groups.join(", ")
         );
@@ -555,6 +555,49 @@ async fn run_replace(
     );
     run_execute(conn, &sql, &params).await?;
     Ok(())
+}
+
+async fn run_upsert(
+    conn: &impl ConnectionTrait,
+    schema: &Schema,
+    batch: &[Vec<(Name, Value)>],
+) -> Result<usize, StoreError> {
+    if batch.is_empty() {
+        return Ok(0);
+    }
+    if !schema
+        .fields
+        .iter()
+        .any(|field| matches!(field.kind.flat(), Type::Key))
+    {
+        let created = run_create(conn, schema, batch).await?;
+        return Ok(created.len());
+    }
+    let head = &batch[0];
+    let columns = head
+        .iter()
+        .map(|pair| format!("\"{}\"", pair.0))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut params = Vec::new();
+    let mut groups = Vec::new();
+    for cells in batch {
+        groups.push(format!("({})", vec!["?"; cells.len()].join(", ")));
+        params.extend(cells.iter().map(|pair| pair.1.clone()));
+    }
+    let key = schema.key();
+    let sets = head
+        .iter()
+        .filter(|pair| pair.0 != key)
+        .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT INTO \"{}\" ({columns}) VALUES {} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
+        schema.table,
+        groups.join(", ")
+    );
+    run_execute(conn, &sql, &params).await
 }
 
 async fn run_remove(
@@ -760,6 +803,16 @@ impl Store for Sqlite {
         Box::pin(async move { run_create(&self.conn, &schema, &batch).await })
     }
 
+    fn upsert<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        let batch = batch.to_vec();
+        Box::pin(async move { run_upsert(&self.conn, &schema, &batch).await })
+    }
+
     fn replace<'a>(
         &'a self,
         schema: &'a Schema,
@@ -927,6 +980,22 @@ impl Store for Trade {
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
             run_create(txn, &schema, &batch).await
+        })
+    }
+
+    fn upsert<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        let batch = batch.to_vec();
+        Box::pin(async move {
+            let guard = self.txn.lock().await;
+            let txn = guard
+                .as_ref()
+                .ok_or_else(|| StoreError::Value("settled deal".into()))?;
+            run_upsert(txn, &schema, &batch).await
         })
     }
 
@@ -1162,6 +1231,90 @@ mod tests {
         assert_eq!(rename(&schema, &mixed).len(), 1);
         assert!(alter(&schema, &mixed).is_empty());
         assert_eq!(drop(&schema, &mixed).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upserts() {
+        let db = open_db("upserts").await;
+        let schema = Schema {
+            table: Table("p"),
+            fields: vec![Field::key("code"), Field::new("name", Type::Str)],
+            rules: Vec::new(),
+        };
+        db.define(&schema).await.unwrap();
+        let rows = vec![
+            vec![(Name("code"), Value::str("x")), (Name("name"), Value::str("n1"))],
+            vec![(Name("code"), Value::str("x")), (Name("name"), Value::str("n2"))],
+            vec![(Name("code"), Value::str("y")), (Name("name"), Value::str("m"))],
+        ];
+        db.create(&schema, &rows).await.unwrap();
+        let query = |api| async {
+            db.total_query(&schema, &ask(api)).await.unwrap()
+        };
+        assert_eq!(query(Tree::And(Vec::new())).await, 2);
+        let row = db
+            .scan_query(
+                &schema,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.str(0).unwrap() == "x")
+            .expect("x row");
+        assert_eq!(row.str(1).unwrap(), "n2");
+    }
+
+    #[tokio::test]
+    async fn upsert_merge() {
+        let db = open_db("upsert_merge").await;
+        let schema = Schema {
+            table: Table("p2"),
+            fields: vec![Field::key("code"), Field::new("name", Type::Str)],
+            rules: Vec::new(),
+        };
+        db.define(&schema).await.unwrap();
+        let one = vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("name"), Value::str("n1")),
+        ]];
+        assert_eq!(db.upsert(&schema, &one).await.unwrap(), 1);
+        let two = vec![
+            vec![
+                (Name("code"), Value::str("x")),
+                (Name("name"), Value::str("n2")),
+            ],
+            vec![
+                (Name("code"), Value::str("y")),
+                (Name("name"), Value::str("m")),
+            ],
+        ];
+        assert_eq!(db.upsert(&schema, &two).await.unwrap(), 2);
+        let query = |api| async { db.total_query(&schema, &ask(api)).await.unwrap() };
+        assert_eq!(query(Tree::And(Vec::new())).await, 2);
+        let row = db
+            .scan_query(
+                &schema,
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.str(0).unwrap() == "x")
+            .expect("x row");
+        assert_eq!(row.str(1).unwrap(), "n2");
     }
 
     fn ask(tree: Tree) -> Query {

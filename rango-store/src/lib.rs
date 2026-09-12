@@ -216,6 +216,12 @@ pub trait Store: Send + Sync + 'static {
         cells: &'a [(Name, Value)],
     ) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    fn upsert<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<usize, StoreError>>;
+
     fn remove<'a>(
         &'a self,
         schema: &'a Schema,
