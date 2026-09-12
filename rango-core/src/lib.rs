@@ -23,12 +23,13 @@ pub use model::{
 };
 pub use settings::Settings;
 pub use urls::Routes;
-pub use view::{Request, Response, View, get_view, html, redirect, render};
+pub use view::{Json, Request, Response, View, get_view, html, json, redirect, render};
 
 pub use askama;
 pub use chrono;
 pub use rust_decimal as decimal;
 pub use serde;
+pub use serde_json;
 pub use tokio;
 
 pub use askama::Template;

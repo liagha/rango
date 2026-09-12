@@ -3,14 +3,21 @@ use axum::{
     response::{Html, IntoResponse, Redirect},
     routing::{MethodRouter, get},
 };
+use serde::Serialize;
 
 use crate::error::Error;
+
+pub use axum::extract::Json;
 
 pub type Request = axum::extract::Request;
 pub type Response = axum::response::Response;
 
 pub fn html(body: impl Into<String>) -> Response {
     Html(body.into()).into_response()
+}
+
+pub fn json(data: impl Serialize) -> Response {
+    Json(data).into_response()
 }
 
 pub fn render<T: Template>(template: T) -> Result<Response, Error> {

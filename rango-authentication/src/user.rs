@@ -110,3 +110,69 @@ impl User {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn open(name: &str) -> Arc<dyn Store> {
+        let path = std::env::temp_dir().join(format!(
+            "rango-test-{}-{name}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        rango_core::store::sqlite::open(&path).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn register_checks() {
+        let store = open("register").await;
+        assert!(matches!(
+            User::register(store.clone(), "  ", "password123", false).await,
+            Err(Error::BadRequest(ref message)) if message == "username is required"
+        ));
+        assert!(matches!(
+            User::register(store.clone(), "bob", "short", false).await,
+            Err(Error::BadRequest(ref message)) if message == "password must be at least 8 characters"
+        ));
+        let user = User::register(store, "alice", "password123", false)
+            .await
+            .unwrap();
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.id, 1);
+    }
+
+    #[tokio::test]
+    async fn register_taken() {
+        let store = open("taken").await;
+        User::register(store.clone(), "alice", "password123", false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            User::register(store, "alice", "password123", false).await,
+            Err(Error::BadRequest(ref message)) if message == "username is taken"
+        ));
+    }
+
+    #[tokio::test]
+    async fn login_roundtrip() {
+        let store = open("login").await;
+        User::register(store.clone(), "alice", "password123", true)
+            .await
+            .unwrap();
+        let found = User::login(store.clone(), "alice", "password123")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(found.superuser);
+        assert_eq!(found.id, 1);
+        assert!(User::login(store.clone(), "alice", "wrongpass")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(User::login(store, "nobody", "password123")
+            .await
+            .unwrap()
+            .is_none());
+    }
+}

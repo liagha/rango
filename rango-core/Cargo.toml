@@ -11,6 +11,7 @@ name = "rango_core"
 default = ["forgery", "sqlite"]
 forgery = ["dep:serde_urlencoded"]
 sqlite = ["rango-store/sqlite"]
+postgres = ["rango-store/postgres"]
 
 [dependencies]
 axum.workspace = true
@@ -21,6 +22,7 @@ tower-http.workspace = true
 rango-store.workspace = true
 rango-macros.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
 chrono.workspace = true
 rust_decimal.workspace = true

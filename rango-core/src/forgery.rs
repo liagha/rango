@@ -84,3 +84,124 @@ pub async fn guard(req: Request, next: Next) -> Result<Response, Error> {
     }
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::StatusCode,
+        middleware,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    #[test]
+    fn cookies() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "a=1; forgery=xyz; b=2".parse().unwrap());
+        assert_eq!(cookie(&headers), Some("xyz".into()));
+        assert_eq!(named(&headers, "b"), Some("2".into()));
+        assert_eq!(named(&headers, "none"), None);
+    }
+
+    #[test]
+    fn tokens() {
+        let mut with_ext = axum::http::Request::<()>::builder().body(Body::empty()).unwrap();
+        with_ext.extensions_mut().insert(Token("abc".into()));
+        assert_eq!(token(&with_ext), "abc");
+        let req = axum::http::Request::<()>::builder().body(Body::empty()).unwrap();
+        assert_ne!(token(&req), token(&req));
+    }
+
+    async fn probe(req: Request) -> String {
+        req.extensions()
+            .get::<Token>()
+            .map(|t| t.0.clone())
+            .unwrap_or_default()
+    }
+
+    fn build(method: &str, set: Option<&str>, body: &'static str) -> axum::extract::Request {
+        let mut request = axum::http::Request::<()>::builder()
+            .method(method)
+            .uri("/")
+            .header("content-type", "application/x-www-form-urlencoded");
+        if let Some(cookie) = set {
+            request = request.header(COOKIE, cookie);
+        }
+        request.body(Body::from(body)).unwrap()
+    }
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn app() -> Router {
+        Router::new().route("/", get(probe)).layer(middleware::from_fn(guard))
+    }
+
+    #[tokio::test]
+    async fn issues_token() {
+        let res = app().oneshot(build("GET", None, "")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let issued = res
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("forgery=")
+            .unwrap()
+            .to_string();
+        assert_eq!(issued, body_of(res).await);
+    }
+
+    #[tokio::test]
+    async fn keeps_cookie() {
+        let res = app()
+            .oneshot(build("GET", Some("forgery=stated"), ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get(SET_COOKIE).is_none());
+        assert_eq!(body_of(res).await, "stated");
+    }
+
+    #[tokio::test]
+    async fn guards_post() {
+        let app = Router::new()
+            .route("/", get(probe).post(probe))
+            .layer(middleware::from_fn(guard));
+        let denied = app
+            .clone()
+            .oneshot(build("POST", None, "forgery=nope"))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let wrong = app
+            .clone()
+            .oneshot(build("POST", Some("forgery=said"), "forgery=other"))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+        let ok = app
+            .oneshot(build("POST", Some("forgery=said"), "forgery=said"))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(body_of(ok).await, "said");
+    }
+
+    #[tokio::test]
+    async fn too_large() {
+        let mut req = build("POST", Some("forgery=x"), "forgery=x");
+        *req.body_mut() = Body::from(vec![b'x'; LIMIT + 1]);
+        let res = app().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+}

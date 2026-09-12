@@ -10,3 +10,6 @@ rango-authentication.workspace = true
 askama.workspace = true
 axum.workspace = true
 serde_urlencoded.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

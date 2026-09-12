@@ -47,3 +47,22 @@ impl Default for Errors {
 pub trait Valid {
     fn errors(&self) -> Errors;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors() {
+        let mut errors = Errors::new();
+        assert!(errors.valid());
+        assert_eq!(errors.message("name"), "");
+        errors.push("name", "required");
+        errors.push("name", "too short");
+        errors.push("age", "too old");
+        assert!(!errors.valid());
+        assert_eq!(errors.message("name"), "required");
+        assert_eq!(errors.message("age"), "too old");
+        assert_eq!(errors.message("missing"), "");
+    }
+}

@@ -16,7 +16,7 @@
 </div>
 <form method="post" action="delete/{{ query }}" onsubmit="return confirm('Delete this row?')">
 <input type="hidden" name="forgery" value="{{ token }}">
-<p class="actions"><button class="ghost" type="submit">Delete</button></p>
+<p class="actions"><button class="danger" type="submit">Delete</button></p>
 </form>
 {% for inline in inlines %}
 <h2>{{ inline.title }}</h2>

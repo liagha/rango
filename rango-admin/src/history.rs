@@ -65,7 +65,7 @@ impl Model for History {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Action {
     Create,
     Edit,
@@ -111,4 +111,62 @@ pub(crate) async fn log(
         at: Utc::now(),
     };
     let _ = history.save(&mut entry).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn open(name: &str) -> std::sync::Arc<dyn rango_core::Store> {
+        let path = std::env::temp_dir().join(format!(
+            "rango-test-{}-{name}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        rango_core::store::sqlite::open(&path).await.unwrap()
+    }
+
+    #[test]
+    fn actions() {
+        assert_eq!(Action::Create.name(), "create");
+        assert_eq!(Action::Edit.name(), "edit");
+        assert_eq!(Action::Delete.name(), "delete");
+        assert_eq!(Action::parse("create").unwrap(), Action::Create);
+        assert_eq!(Action::parse("edit").unwrap(), Action::Edit);
+        assert_eq!(Action::parse("delete").unwrap(), Action::Delete);
+        assert!(matches!(
+            Action::parse("junk"),
+            Err(StoreError::Value(ref message)) if message == "bad action junk"
+        ));
+    }
+
+    #[tokio::test]
+    async fn logs() {
+        let store = open("history").await;
+        let repo = Repository::<History>::new(store);
+        log(
+            &repo,
+            Table("posts"),
+            &Value::int(7),
+            Action::Delete,
+            &Current(None),
+        )
+        .await;
+        log(
+            &repo,
+            Table("posts"),
+            &Value::int(3),
+            Action::Create,
+            &Current(None),
+        )
+        .await;
+        let entries = repo.all().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].model, "posts");
+        assert_eq!(entries[0].row, "7");
+        assert_eq!(entries[0].action, Action::Delete);
+        assert_eq!(entries[0].user, "");
+        assert_eq!(entries[1].row, "3");
+        assert_eq!(entries[1].action, Action::Create);
+    }
 }

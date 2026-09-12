@@ -6,10 +6,15 @@ license.workspace = true
 
 [features]
 default = ["sqlite"]
-sqlite = ["dep:sea-orm"]
+sqlite = ["dep:sea-orm", "sea-orm/sqlx-sqlite", "sea-orm/runtime-tokio-rustls"]
+postgres = ["dep:sea-orm", "sea-orm/sqlx-postgres", "sea-orm/runtime-tokio-rustls"]
 
 [dependencies]
-sea-orm = { workspace = true, optional = true, default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { workspace = true, optional = true, default-features = false }
 chrono.workspace = true
 rust_decimal.workspace = true
+serde.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

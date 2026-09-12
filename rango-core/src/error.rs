@@ -58,3 +58,28 @@ impl IntoResponse for Error {
         (self.status(), self.to_string()).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses() {
+        assert_eq!(
+            Error::BadRequest("x".into()).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(Error::Forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(Error::NotFound.status(), StatusCode::NOT_FOUND);
+        assert!(Error::Server("x".into()).status().is_server_error());
+        assert!(Error::Render("x".into()).status().is_server_error());
+    }
+
+    #[test]
+    fn display() {
+        assert_eq!(Error::BadRequest("msg".into()).to_string(), "msg");
+        assert_eq!(Error::Forbidden.to_string(), "Forbidden");
+        assert_eq!(Error::NotFound.to_string(), "Not Found");
+        assert_eq!(Error::Server("msg".into()).to_string(), "msg");
+    }
+}

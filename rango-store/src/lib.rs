@@ -1,6 +1,9 @@
 pub mod spec;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "postgres")]
+pub mod postgres;
+mod engine;
 
 pub use spec::{
     Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
@@ -11,6 +14,7 @@ use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -21,6 +25,23 @@ pub enum Value {
     Bool(bool),
     DateTime(DateTime<Utc>),
     Decimal(Decimal),
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Null => serializer.serialize_none(),
+            Self::Int(value) => serializer.serialize_i64(*value),
+            Self::Float(value) => serializer.serialize_f64(*value),
+            Self::Str(value) => serializer.serialize_str(value),
+            Self::Bool(value) => serializer.serialize_bool(*value),
+            Self::DateTime(at) => serializer.serialize_str(&at.to_rfc3339()),
+            Self::Decimal(value) => serializer.serialize_str(&value.to_string()),
+        }
+    }
 }
 
 impl Value {
@@ -64,20 +85,20 @@ impl From<&Option<String>> for Value {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum ColumnKind {
     Integer,
     Real,
     Text,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Column {
     pub name: String,
     pub kind: ColumnKind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Row {
     pub values: Vec<Value>,
 }
@@ -290,5 +311,40 @@ mod tests {
         assert_eq!(Value::from(&Some("a".to_string())), Value::Str("a".into()));
         let none: Option<String> = None;
         assert_eq!(Value::from(&none), Value::Null);
+    }
+
+    #[test]
+    fn json() {
+        assert_eq!(serde_json::to_string(&Value::Null).unwrap(), "null");
+        assert_eq!(serde_json::to_string(&Value::Int(12)).unwrap(), "12");
+        assert_eq!(serde_json::to_string(&Value::Float(1.5)).unwrap(), "1.5");
+        assert_eq!(serde_json::to_string(&Value::Str("hi".into())).unwrap(), "\"hi\"");
+        assert_eq!(serde_json::to_string(&Value::Bool(true)).unwrap(), "true");
+        let at = DateTime::from_timestamp(0, 0).unwrap();
+        assert_eq!(
+            serde_json::to_string(&Value::datetime(at)).unwrap(),
+            "\"1970-01-01T00:00:00+00:00\""
+        );
+        let money = Decimal::from_str_exact("1.50").unwrap();
+        assert_eq!(
+            serde_json::to_string(&Value::decimal(money)).unwrap(),
+            "\"1.50\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnKind::Integer).unwrap(),
+            "\"Integer\""
+        );
+        let column = Column {
+            name: "posts".into(),
+            kind: ColumnKind::Text,
+        };
+        assert_eq!(
+            serde_json::to_string(&column).unwrap(),
+            "{\"name\":\"posts\",\"kind\":\"Text\"}"
+        );
+        let row = Row {
+            values: vec![Value::Int(1), Value::Null],
+        };
+        assert_eq!(serde_json::to_string(&row).unwrap(), "{\"values\":[1,null]}");
     }
 }

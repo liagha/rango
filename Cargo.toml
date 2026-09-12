@@ -23,12 +23,13 @@ rango-core = { path = "rango-core", version = "0.1.0" }
 rango-macros = { path = "rango-macros", version = "0.1.0" }
 rango-store = { path = "rango-store", version = "0.1.0", default-features = false }
 
-axum = { version = "0.8.9", features = ["form"] }
+axum = { version = "0.8.9", features = ["form", "json"] }
 askama = "0.16.1"
 tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5.2"
 tower-http = { version = "0.7.1", features = ["fs", "trace", "catch-panic"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 serde_urlencoded = "0.7"
 chrono = "0.4"
 rust_decimal = "1"
