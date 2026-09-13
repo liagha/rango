@@ -124,7 +124,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rango-test-{}-{name}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        rango_core::store::sqlite::open(&path).await.unwrap()
+        rango_core::store::Sqlite::open(&path).await.unwrap()
     }
 
     #[tokio::test]

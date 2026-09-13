@@ -580,7 +580,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rango-test-{}-gets.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let store = crate::store::sqlite::open(&path).await.unwrap();
+        let store = crate::store::Sqlite::open(&path).await.unwrap();
         let repo = Repository::<Post>::new(store);
         let mut post = Post {
             id: 0,
@@ -650,7 +650,7 @@ mod tests {
         let path = std::env::temp_dir()
             .join(format!("rango-test-{}-related.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let store = crate::store::sqlite::open(&path).await.unwrap();
+        let store = crate::store::Sqlite::open(&path).await.unwrap();
         let tag_schema = Schema {
             table: Table("tags"),
             fields: vec![Field::id(), Field::str("name")],

@@ -107,7 +107,7 @@ impl Rango {
             eprintln!("error: {fail}");
             std::process::exit(1);
         }
-        match store::sqlite::open(&store.join("rango.sqlite")).await {
+        match store::Sqlite::open(&store.join("rango.sqlite")).await {
             Ok(store) => store,
             Err(fail) => {
                 eprintln!("error: {fail}");

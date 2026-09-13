@@ -236,19 +236,6 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
         }
     }
 
-    fn kind_of(&self, raw: &str) -> ColumnKind {
-        let sql = raw.to_uppercase();
-        if sql.contains("INT") || sql.contains("BOOL") {
-            ColumnKind::Integer
-        } else if sql.contains("CHAR") || sql.contains("TEXT") {
-            ColumnKind::Text
-        } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
-            ColumnKind::Real
-        } else {
-            ColumnKind::Text
-        }
-    }
-
     fn introspect(&self, table: &str) -> String;
 
     fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr>;

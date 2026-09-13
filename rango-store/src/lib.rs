@@ -22,6 +22,13 @@ pub use spec::{
     Run, Schema, Sort, Table, Tree,
 };
 
+/// SQLite backend type, enabled by default.
+#[cfg(feature = "sqlite")]
+pub use sqlite::Sqlite;
+/// PostgreSQL backend type behind the `postgres` feature.
+#[cfg(feature = "postgres")]
+pub use postgres::Postgres;
+
 use std::{fmt, future::Future, hash::{Hash, Hasher}, pin::Pin, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -155,11 +162,16 @@ pub enum ColumnKind {
 
 impl ColumnKind {
     /// Affinity of a field's SQL type name.
-    pub fn of(dtype: &str) -> Self {
-        match dtype {
-            "INTEGER" => ColumnKind::Integer,
-            "REAL" => ColumnKind::Real,
-            _ => ColumnKind::Text,
+    pub fn of(raw: &str) -> Self {
+        let sql = raw.to_uppercase();
+        if sql.contains("INT") || sql.contains("BOOL") {
+            ColumnKind::Integer
+        } else if sql.contains("CHAR") || sql.contains("TEXT") {
+            ColumnKind::Text
+        } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
+            ColumnKind::Real
+        } else {
+            ColumnKind::Text
         }
     }
 }

@@ -34,7 +34,7 @@ impl Dialect for Postgres {
 
     fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
         let name = row.try_get_by_index::<String>(0)?;
-        let kind = self.kind_of(&row.try_get_by_index::<String>(1)?);
+        let kind = ColumnKind::of(&row.try_get_by_index::<String>(1)?);
         Ok((name, kind))
     }
 
@@ -64,10 +64,12 @@ impl Dialect for Postgres {
     }
 }
 
-/// Connects to a PostgreSQL database at `url` (e.g. `postgres://...`) as a [`Store`].
-pub async fn connect(url: &str) -> Result<Arc<dyn Store>, StoreError> {
-    let conn = Database::connect(url).await.map_err(StoreError::from)?;
-    Ok(Arc::new(Engine::new(Postgres, conn)))
+impl Postgres {
+    /// Connects to a PostgreSQL database at `url` (e.g. `postgres://...`) as a [`Store`].
+    pub async fn connect(url: &str) -> Result<Arc<dyn Store>, StoreError> {
+        let conn = Database::connect(url).await.map_err(StoreError::from)?;
+        Ok(Arc::new(Engine::new(Postgres, conn)))
+    }
 }
 
 #[cfg(test)]
@@ -81,7 +83,7 @@ mod tests {
         if url.is_empty() {
             return None;
         }
-        Some(connect(&url).await.unwrap())
+        Some(Postgres::connect(&url).await.unwrap())
     }
 
     fn ask(tree: Tree) -> Query {

@@ -621,7 +621,18 @@ impl Action {
         Self {
             name: Name("wipe"),
             title: "Delete",
-            run: wipe,
+            run: |store, schema, keys| {
+                Box::pin(async move {
+                    for key in &keys {
+                        store.remove(&schema, key).await?;
+                    }
+                    if keys.len() == 1 {
+                        Ok("Deleted 1 row.".into())
+                    } else {
+                        Ok(format!("Deleted {} rows.", keys.len()))
+                    }
+                })
+            },
             logged: true,
             row: true,
         }
@@ -639,23 +650,6 @@ pub enum Policy {
     Set,
     /// Leave the reference; the database rejects parent deletes.
     Nothing,
-}
-
-fn wipe(
-    store: Arc<dyn Store>,
-    schema: Schema,
-    keys: Vec<Key>,
-) -> BoxFuture<'static, Result<String, StoreError>> {
-    Box::pin(async move {
-        for key in &keys {
-            store.remove(&schema, key).await?;
-        }
-        if keys.len() == 1 {
-            Ok("Deleted 1 row.".into())
-        } else {
-            Ok(format!("Deleted {} rows.", keys.len()))
-        }
-    })
 }
 
 #[cfg(test)]

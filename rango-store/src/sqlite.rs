@@ -32,7 +32,7 @@ impl Dialect for Sqlite {
 
     fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
         let name = row.try_get_by_index::<String>(1)?;
-        let kind = self.kind_of(&row.try_get_by_index::<String>(2)?);
+        let kind = ColumnKind::of(&row.try_get_by_index::<String>(2)?);
         Ok((name, kind))
     }
 
@@ -57,29 +57,31 @@ impl Dialect for Sqlite {
     }
 }
 
-/// Opens a SQLite database at `path`, creating it when absent, as a [`Store`].
-pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
-    let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
-    let conn = Database::connect(&url).await.map_err(StoreError::from)?;
-    conn.execute_unprepared("PRAGMA foreign_keys=ON")
-        .await
-        .map_err(StoreError::from)?;
-    Ok(Arc::new(Engine::new(Sqlite, conn)))
-}
-
-/// Opens a SQLite database at `path` in WAL mode (busy timeout 5s) as a [`Store`].
-pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
-    let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
-    let conn = Database::connect(&url).await.map_err(StoreError::from)?;
-    for pragma in [
-        "PRAGMA journal_mode=WAL",
-        "PRAGMA synchronous=NORMAL",
-        "PRAGMA busy_timeout=5000",
-        "PRAGMA foreign_keys=ON",
-    ] {
-        conn.execute_unprepared(pragma).await.map_err(StoreError::from)?;
+impl Sqlite {
+    /// Opens a SQLite database at `path`, creating it when absent, as a [`Store`].
+    pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
+        let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
+        let conn = Database::connect(&url).await.map_err(StoreError::from)?;
+        conn.execute_unprepared("PRAGMA foreign_keys=ON")
+            .await
+            .map_err(StoreError::from)?;
+        Ok(Arc::new(Engine::new(Sqlite, conn)))
     }
-    Ok(Arc::new(Engine::new(Sqlite, conn)))
+
+    /// Opens a SQLite database at `path` in WAL mode (busy timeout 5s) as a [`Store`].
+    pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
+        let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
+        let conn = Database::connect(&url).await.map_err(StoreError::from)?;
+        for pragma in [
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=NORMAL",
+            "PRAGMA busy_timeout=5000",
+            "PRAGMA foreign_keys=ON",
+        ] {
+            conn.execute_unprepared(pragma).await.map_err(StoreError::from)?;
+        }
+        Ok(Arc::new(Engine::new(Sqlite, conn)))
+    }
 }
 
 #[cfg(test)]
@@ -96,11 +98,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rango-test-{}-{}.sqlite", std::process::id(), name));
         let _ = std::fs::remove_file(&path);
-        open(&path).await.unwrap()
-    }
-
-    async fn store() -> Arc<dyn Store> {
-        open_db("base").await
+        Sqlite::open(&path).await.unwrap()
     }
 
     fn schema() -> Schema {
@@ -564,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip() {
-        let db = store().await;
+        let db = open_db("roundtrip").await;
         db.execute(
             "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER, score REAL, flag INTEGER, at INTEGER)",
             &[],
@@ -629,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing() {
-        let db = store().await;
+        let db = open_db("missing").await;
         assert!(db.columns("nope").await.unwrap().is_empty());
         assert!(db.fetch("SELECT * FROM nope", &[], &[]).await.is_err());
     }
@@ -713,12 +711,12 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rango-test-{}-isolates.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let first = open_wal(&path).await.unwrap();
+        let first = Sqlite::open_wal(&path).await.unwrap();
         let schema = deals();
         first.define(&schema).await.unwrap();
         let tx = first.deal().await.unwrap();
         tx.create(&schema, &one()).await.unwrap();
-        let second = open_wal(&path).await.unwrap();
+        let second = Sqlite::open_wal(&path).await.unwrap();
         let ask_all = || ask(Tree::And(Vec::new()));
         assert_eq!(second.total_query(&schema, &ask_all()).await.unwrap(), 0);
         tx.settle(true).await.unwrap();
@@ -758,7 +756,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("rango-test-{}-abandons.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let db = open_wal(&path).await.unwrap();
+        let db = Sqlite::open_wal(&path).await.unwrap();
         let schema = deals();
         db.define(&schema).await.unwrap();
         {
@@ -1067,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn checked() {
-        let db = store().await;
+        let db = open_db("checked").await;
         db.define(&guarded()).await.unwrap();
         let good = vec![(Name("a"), Value::int(1)), (Name("b"), Value::int(2))];
         db.create(&guarded(), &[good]).await.unwrap();

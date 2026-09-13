@@ -130,13 +130,13 @@ impl Default for Settings {
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
-    use crate::store::sqlite;
+    use crate::store::Sqlite;
 
     #[tokio::test]
     async fn keeps() {
         let path = std::env::temp_dir().join(format!("rango-secret-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let store = sqlite::open(&path).await.unwrap();
+        let store = Sqlite::open(&path).await.unwrap();
         let first = key(store.as_ref()).await;
         assert_eq!(first.len(), 64);
         assert_eq!(key(store.as_ref()).await, first);
