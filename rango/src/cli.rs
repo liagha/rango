@@ -170,6 +170,17 @@ pub async fn migrate(
     Ok(done)
 }
 
+const MANIFEST: &str = r#"[package]
+name = "{NAME}"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+rango = { path = "{PATH}" }
+"#;
+
 /// Scaffold a new project in the current directory.
 pub fn project(name: &str) -> Result<String, Fail> {
     if !valid(name) {
@@ -187,7 +198,7 @@ pub fn project(name: &str) -> Result<String, Fail> {
     let files = [
         (
             "Cargo.toml",
-            include_str!("skel/Cargo.toml")
+            MANIFEST
                 .replace("{NAME}", name)
                 .replace("{PATH}", env!("CARGO_MANIFEST_DIR")),
         ),
