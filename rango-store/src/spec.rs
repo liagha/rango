@@ -116,6 +116,13 @@ pub enum Tree {
     Cut(Box<Tree>),
 }
 
+impl Tree {
+    /// Tree matching no rows.
+    pub fn none() -> Self {
+        Self::Or(Vec::new())
+    }
+}
+
 /// Sort direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Order {

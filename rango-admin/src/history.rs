@@ -12,7 +12,7 @@ pub(crate) struct History {
     pub(crate) id: i64,
     pub(crate) model: String,
     pub(crate) row: String,
-    pub(crate) action: Action,
+    pub(crate) action: Event,
     pub(crate) user: String,
     pub(crate) at: DateTime<Utc>,
 }
@@ -50,7 +50,7 @@ impl Model for History {
             id,
             model,
             row,
-            action: Action::parse(&action)?,
+            action: Event::parse(&action)?,
             user: Storable::take(r)?,
             at: Storable::take(r)?,
         })
@@ -67,13 +67,13 @@ impl Model for History {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum Action {
+pub(crate) enum Event {
     Create,
     Edit,
     Delete,
 }
 
-impl Action {
+impl Event {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Create => "create",
@@ -92,26 +92,28 @@ impl Action {
     }
 }
 
-pub(crate) async fn log(
-    history: &Repository<History>,
-    table: Table,
-    row: &Value,
-    action: Action,
-    current: &Current,
-) {
-    let mut entry = History {
-        id: 0,
-        model: table.to_string(),
-        row: text(Some(row)),
-        action,
-        user: current
-            .0
-            .as_ref()
-            .map(|user| user.username.clone())
-            .unwrap_or_default(),
-        at: Utc::now(),
-    };
-    let _ = history.save(&mut entry).await;
+impl History {
+    pub(crate) async fn log(
+        history: &Repository<History>,
+        table: Table,
+        row: &Value,
+        action: Event,
+        current: &Current,
+    ) {
+        let mut entry = History {
+            id: 0,
+            model: table.to_string(),
+            row: text(Some(row)),
+            action,
+            user: current
+                .0
+                .as_ref()
+                .map(|user| user.username.clone())
+                .unwrap_or_default(),
+            at: Utc::now(),
+        };
+        let _ = history.save(&mut entry).await;
+    }
 }
 
 #[cfg(test)]
@@ -126,15 +128,15 @@ mod tests {
     }
 
     #[test]
-    fn actions() {
-        assert_eq!(Action::Create.name(), "create");
-        assert_eq!(Action::Edit.name(), "edit");
-        assert_eq!(Action::Delete.name(), "delete");
-        assert_eq!(Action::parse("create").unwrap(), Action::Create);
-        assert_eq!(Action::parse("edit").unwrap(), Action::Edit);
-        assert_eq!(Action::parse("delete").unwrap(), Action::Delete);
+    fn events() {
+        assert_eq!(Event::Create.name(), "create");
+        assert_eq!(Event::Edit.name(), "edit");
+        assert_eq!(Event::Delete.name(), "delete");
+        assert_eq!(Event::parse("create").unwrap(), Event::Create);
+        assert_eq!(Event::parse("edit").unwrap(), Event::Edit);
+        assert_eq!(Event::parse("delete").unwrap(), Event::Delete);
         assert!(matches!(
-            Action::parse("junk"),
+            Event::parse("junk"),
             Err(StoreError::Value(ref message)) if message == "bad action junk"
         ));
     }
@@ -143,29 +145,15 @@ mod tests {
     async fn logs() {
         let store = open("history").await;
         let repo = Repository::<History>::new(store);
-        log(
-            &repo,
-            Table("posts"),
-            &Value::int(7),
-            Action::Delete,
-            &Current(None),
-        )
-        .await;
-        log(
-            &repo,
-            Table("posts"),
-            &Value::int(3),
-            Action::Create,
-            &Current(None),
-        )
-        .await;
+        History::log(&repo, Table("posts"), &Value::int(7), Event::Delete, &Current(None)).await;
+        History::log(&repo, Table("posts"), &Value::int(3), Event::Create, &Current(None)).await;
         let entries = repo.all().await.unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].model, "posts");
         assert_eq!(entries[0].row, "7");
-        assert_eq!(entries[0].action, Action::Delete);
+        assert_eq!(entries[0].action, Event::Delete);
         assert_eq!(entries[0].user, "");
         assert_eq!(entries[1].row, "3");
-        assert_eq!(entries[1].action, Action::Create);
+        assert_eq!(entries[1].action, Event::Create);
     }
 }

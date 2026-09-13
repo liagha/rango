@@ -37,7 +37,7 @@ pub(crate) fn tree(
                     op: Op::Eq,
                     value: Value::decimal(number),
                 })),
-                Err(_) => return Tree::Or(Vec::new()),
+                Err(_) => return Tree::none(),
             },
             Widget::Int => match raw.parse::<i64>() {
                 Ok(number) => parts.push(Tree::Leaf(Filter {
@@ -45,7 +45,7 @@ pub(crate) fn tree(
                     op: Op::Eq,
                     value: Value::int(number),
                 })),
-                Err(_) => return Tree::Or(Vec::new()),
+                Err(_) => return Tree::none(),
             },
             Widget::Flt => match raw.parse::<f64>() {
                 Ok(number) => parts.push(Tree::Leaf(Filter {
@@ -53,7 +53,7 @@ pub(crate) fn tree(
                     op: Op::Eq,
                     value: Value::float(number),
                 })),
-                Err(_) => return Tree::Or(Vec::new()),
+                Err(_) => return Tree::none(),
             },
             Widget::Choice => parts.push(Tree::Leaf(Filter {
                 field: field.name,
@@ -71,7 +71,7 @@ pub(crate) fn tree(
                     op: Op::At,
                     value: Value::datetime(day.and_time(NaiveTime::MIN).and_utc()),
                 })),
-                Err(_) => return Tree::Or(Vec::new()),
+                Err(_) => return Tree::none(),
             },
         }
     }
@@ -189,7 +189,7 @@ mod tests {
         params.insert("age".into(), "bad".into());
         assert_eq!(
             tree(&fields, &params, "", &[1], &HashMap::new()),
-            Tree::Or(Vec::new())
+            Tree::none()
         );
     }
 

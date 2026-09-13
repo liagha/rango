@@ -1339,6 +1339,7 @@ dependencies = [
  "serde_urlencoded",
  "sha2",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

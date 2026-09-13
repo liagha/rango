@@ -10,16 +10,16 @@ use rango_core::{
     Cells, Error, Repository, Response, Store, Value, Widget,
     forgery::{Token, cookie},
     model::{
-        Action as Deed, Field, Filter, Key, Link, Model, Name, Only, Op, Order, Page, Query, Schema,
+        Action, Field, Filter, Key, Link, Model, Name, Only, Op, Order, Page, Query, Schema,
         Sort, Table, Tree,
     },
     view::{self, render},
 };
 
 use super::form::{filter_input, input, input_raw, links_input, locked, reference_input, value};
-use super::history::{Action, History, log};
+use super::history::{Event, History};
 use super::query::{PAGE, encode, here, href, tree};
-use super::row::{align, cell, id_of, locate, text, when, with_id};
+use super::row::{align, cell, id_of, locate, stamp, text, with_id};
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -42,7 +42,7 @@ struct List {
     query: String,
     held: Vec<Held>,
     notice: String,
-    actions: Vec<Deed>,
+    actions: Vec<Action>,
     token: String,
     filters: Vec<String>,
     columns: Vec<Column>,
@@ -527,7 +527,7 @@ pub(crate) async fn detail<M: Model>(
     let past: Vec<Log> = events
         .into_iter()
         .map(|event| Log {
-            at: when(&event.at),
+            at: stamp(&event.at),
             user: event.user,
             action: event.action.name().to_string(),
         })
@@ -720,7 +720,7 @@ pub(crate) async fn create<M: Model>(
     for (field, chosen) in picks {
         links(&store, &models.0, field, &id, &chosen).await?;
     }
-    log(&history, M::table(), &model.id(), Action::Create, &current).await;
+    History::log(&history, M::table(), &model.id(), Event::Create, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
 }
 
@@ -881,7 +881,14 @@ pub(crate) async fn replace<M: Model>(
     for (field, chosen) in picks {
         links(&store, &models.0, field, &id_value, &chosen).await?;
     }
-    log(&history, M::table(), &Repository::<M>::key(&id), Action::Edit, &current).await;
+    History::log(
+        &history,
+        M::table(),
+        &Repository::<M>::key(&id),
+        Event::Edit,
+        &current,
+    )
+    .await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
 }
 
@@ -893,11 +900,11 @@ pub(crate) async fn remove<M: Model>(
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
     repository.delete(&Repository::<M>::key(&id)).await?;
-    log(
+    History::log(
         &history,
         M::table(),
         &Repository::<M>::key(&id),
-        Action::Delete,
+        Event::Delete,
         &current,
     )
     .await;
@@ -949,7 +956,7 @@ pub(crate) async fn act<M: Model>(
     let msg = (deed.run)(store.0.clone(), schema, keys.clone()).await?;
     if deed.logged {
         for key in &keys {
-            log(&history, M::table(), &key.value(), Action::Delete, &current).await;
+            History::log(&history, M::table(), &key.value(), Event::Delete, &current).await;
         }
     }
     Ok(to(&msg))

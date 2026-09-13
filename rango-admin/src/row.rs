@@ -4,7 +4,7 @@ use rango_core::{
     store::Value,
 };
 
-pub(crate) fn when(at: &DateTime<Utc>) -> String {
+pub(crate) fn stamp(at: &DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M").to_string()
 }
 
@@ -18,7 +18,7 @@ pub(crate) fn text(value: Option<&Value>) -> String {
         Some(Value::Int(value)) => value.to_string(),
         Some(Value::Float(value)) => value.to_string(),
         Some(Value::Bool(value)) => value.to_string(),
-        Some(Value::DateTime(at)) => when(at),
+        Some(Value::DateTime(at)) => stamp(at),
         Some(Value::Decimal(value)) => value.to_string(),
         Some(Value::Null) | None => String::new(),
     }
@@ -51,6 +51,8 @@ pub(crate) fn locate(names: &[Name], fields: &[Field]) -> Vec<usize> {
     out
 }
 
+/// Full row against the field list, id first. Many fields are virtual — no row()
+/// slot — and pad their position with Null; keyed fields are consumed and dropped.
 pub(crate) fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
     let mut out = vec![model.id()];
     let mut values = model.row().into_iter();
@@ -71,6 +73,8 @@ pub(crate) fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
     out
 }
 
+/// Scanned values against the field list. Many fields are virtual — no scanned
+/// column — and pad their position with Null; remaining columns are consumed in order.
 pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
     let mut out = Vec::with_capacity(fields.len());
     let mut slots = values.iter();
