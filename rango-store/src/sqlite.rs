@@ -120,8 +120,8 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
 mod tests {
     use super::*;
     use crate::{
-        Action, Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table,
-        Tree,
+        Action, Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Rule, Sort,
+        Table, Tree,
     };
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
     use rust_decimal::Decimal;
@@ -1078,5 +1078,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    fn guarded() -> Schema {
+        Schema {
+            table: Table("guards"),
+            fields: vec![Field::id(), Field::cell::<i64>("a"), Field::cell::<i64>("b")],
+            rules: vec![
+                Rule::Unique(vec![Name("a"), Name("b")]),
+                Rule::Check("b >= 0"),
+            ],
+        }
+    }
+
+    #[test]
+    fn constraints() {
+        assert_eq!(
+            Sqlite.ddl(&guarded()),
+            "CREATE TABLE IF NOT EXISTS \"guards\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"a\" INTEGER NOT NULL, \"b\" INTEGER NOT NULL, UNIQUE (\"a\", \"b\"), CHECK (b >= 0))"
+        );
+    }
+
+    #[tokio::test]
+    async fn checked() {
+        let db = store().await;
+        db.define(&guarded()).await.unwrap();
+        let good = vec![(Name("a"), Value::int(1)), (Name("b"), Value::int(2))];
+        db.create(&guarded(), &[good]).await.unwrap();
+        let bad = vec![(Name("a"), Value::int(1)), (Name("b"), Value::int(-1))];
+        assert!(db.create(&guarded(), &[bad]).await.is_err());
+        let dup = vec![(Name("a"), Value::int(1)), (Name("b"), Value::int(2))];
+        assert!(db.create(&guarded(), &[dup]).await.is_err());
     }
 }

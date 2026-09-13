@@ -55,10 +55,6 @@ impl Choice {
     }
 }
 
-/// A named checkbox constraint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Check(pub &'static str);
-
 /// Reference between tables.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Link {
@@ -68,15 +64,13 @@ pub enum Link {
     Via(Table, Name, Name),
 }
 
-/// Repository-level constraint attached to a [`Schema`].
+/// Table-level constraint appended to the create statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rule {
-    /// The named columns must hold equal values across related rows.
-    Same(Vec<Name>),
-    /// The named column keeps a reference shared by linked rows.
-    Hold(Name),
-    /// A named checkbox constraint must hold.
-    Said(Check),
+    /// Unique across the given columns.
+    Unique(Vec<Name>),
+    /// Raw check expression, e.g. `"price >= 0"`.
+    Check(&'static str),
 }
 
 /// Comparison operator for a [`Filter`].

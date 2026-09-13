@@ -18,7 +18,7 @@ pub mod spec;
 pub mod sqlite;
 
 pub use spec::{
-    Action, Check, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
+    Action, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
     Run, Schema, Sort, Table, Tree,
 };
 

@@ -24,7 +24,7 @@ pub use error::Error;
 pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
 pub use model::{
-    Action, Check, Choice, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Query,
+    Action, Choice, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Query,
     Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
 };
 pub use settings::Settings;

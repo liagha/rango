@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub use crate::store::{
-    Action, Check, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
+    Action, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
     Run, Schema, Sort, Table, Tree,
 };
 
@@ -62,13 +62,13 @@ pub trait Model: Clone + Send + Sync + 'static {
         Schema {
             table: Self::table(),
             fields: Self::fields(),
-            rules: Vec::new(),
+            rules: Self::rules(),
         }
     }
 
-    /// Full schema including any overriding rules.
-    fn spec() -> Schema {
-        Self::schema()
+    /// Table-level constraints appended to the create statement.
+    fn rules() -> Vec<Rule> {
+        Vec::new()
     }
 
     /// Cell values of this model in field order.
@@ -532,19 +532,19 @@ mod tests {
     }
 
     #[test]
-    fn spec() {
-        let spec = Post::spec();
-        assert_eq!(spec.table, Table("posts"));
-        assert_eq!(spec.rules, Vec::new());
-        assert_eq!(Post::spec().key(), Name("id"));
-        assert_eq!(Product::spec().key(), Name("sku"));
+    fn schema() {
+        let schema = Post::schema();
+        assert_eq!(schema.table, Table("posts"));
+        assert_eq!(schema.rules, Vec::new());
+        assert_eq!(Post::schema().key(), Name("id"));
+        assert_eq!(Product::schema().key(), Name("sku"));
         assert_eq!(Post::columns(), vec![Name("title")]);
         assert_eq!(Post::search(), vec![Name("title")]);
     }
 
     #[test]
     fn sorts() {
-        let schema = Post::spec();
+        let schema = Post::schema();
         assert_eq!(
             Sort::parse("title", &schema),
             Sort {
@@ -570,9 +570,9 @@ mod tests {
 
     #[test]
     fn keys() {
-        assert_eq!(Key::parse("7", &Post::spec()).value(), Value::int(7));
-        assert_eq!(Key::parse("7", &Product::spec()).value(), Value::str("7"));
-        assert_eq!(Key::parse("x", &Post::spec()).value(), Value::str("x"));
+        assert_eq!(Key::parse("7", &Post::schema()).value(), Value::int(7));
+        assert_eq!(Key::parse("7", &Product::schema()).value(), Value::str("7"));
+        assert_eq!(Key::parse("x", &Post::schema()).value(), Value::str("x"));
     }
 
     #[tokio::test]
@@ -657,8 +657,8 @@ mod tests {
             rules: Vec::new(),
         };
         store.define(&tag_schema).await.unwrap();
-        store.define(&Post::spec()).await.unwrap();
-        store.define(&Pin::spec()).await.unwrap();
+        store.define(&Post::schema()).await.unwrap();
+        store.define(&Pin::schema()).await.unwrap();
         store
             .create(&tag_schema, &[vec![(Name("name"), Value::str("one"))]])
             .await
@@ -669,7 +669,7 @@ mod tests {
             .unwrap();
         store
             .create(
-                &Post::spec(),
+                &Post::schema(),
                 &[vec![(Name("title"), Value::str("one"))]],
             )
             .await
@@ -682,8 +682,8 @@ mod tests {
             (Name("post"), Value::int(1)),
             (Name("tag"), Value::int(2)),
         ]];
-        store.create(&Pin::spec(), &first).await.unwrap();
-        store.create(&Pin::spec(), &second).await.unwrap();
+        store.create(&Pin::schema(), &first).await.unwrap();
+        store.create(&Pin::schema(), &second).await.unwrap();
         let posts = vec![
             Post {
                 id: 1,
@@ -696,7 +696,7 @@ mod tests {
         ];
         let out = related_many(
             &store,
-            &[Post::spec(), Pin::spec(), tag_schema],
+            &[Post::schema(), Pin::schema(), tag_schema],
             &posts,
             Name("tags"),
         )

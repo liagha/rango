@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Query, Row, Rows,
-    Schema, Store, StoreError, Tree, Value,
+    Rule, Schema, Store, StoreError, Tree, Value,
 };
 
 /// SQL dialect: backend grammar, schema rendering, and row decoding.
@@ -59,16 +59,29 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
     }
 
     fn ddl(&self, schema: &Schema) -> String {
-        let columns = schema
+        let mut parts = schema
             .fields
             .iter()
             .filter(|field| !field.many)
             .map(|field| self.column(field))
             .collect::<Vec<_>>();
+        for rule in &schema.rules {
+            let constraint = match rule {
+                Rule::Unique(columns) => {
+                    let names = columns
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect::<Vec<_>>();
+                    format!("UNIQUE ({})", names.join(", "))
+                }
+                Rule::Check(expr) => format!("CHECK ({expr})"),
+            };
+            parts.push(constraint);
+        }
         format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
             schema.table,
-            columns.join(", ")
+            parts.join(", ")
         )
     }
 
