@@ -72,5 +72,5 @@ The framework is split into focused crates, all re-exported through `rango`:
 - [`rango-store`](rango-store) — typed SQLite/PostgreSQL storage
 - [`rango-authentication`](rango-authentication) — signup, login, sessions
 - [`rango-admin`](rango-admin) — auto-generated admin panel
-- [`rango-macros`](rango-macros) — `Model` derive and attribute macros
+- [`rango-macro`](rango-macros) — `Model` derive and attribute macros
 - [`examples/helloworld`](examples/helloworld) — minimal runnable app

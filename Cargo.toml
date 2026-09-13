@@ -21,7 +21,7 @@ rango = { package = "rango-web", path = "rango", version = "0.1.0" }
 rango-admin = { path = "rango-admin", version = "0.1.0" }
 rango-authentication = { path = "rango-authentication", version = "0.1.0" }
 rango-core = { path = "rango-core", version = "0.1.0" }
-rango-macros = { path = "rango-macros", version = "0.1.0" }
+rango-macros = { package = "rango-macro", path = "rango-macros", version = "0.1.0" }
 rango-store = { path = "rango-store", version = "0.1.0", default-features = false }
 
 axum = { version = "0.8.9", features = ["form", "json"] }

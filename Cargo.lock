@@ -1348,7 +1348,7 @@ dependencies = [
  "askama",
  "axum",
  "chrono",
- "rango-macros",
+ "rango-macro",
  "rango-store",
  "rust_decimal",
  "serde",
@@ -1363,7 +1363,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rango-macros"
+name = "rango-macro"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
