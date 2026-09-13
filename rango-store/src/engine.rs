@@ -215,7 +215,39 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
         head: &[(Name, Value)],
         columns: &str,
         groups: &str,
-    ) -> String;
+    ) -> String {
+        let key = schema.key();
+        let sets = head
+            .iter()
+            .filter(|pair| pair.0 != key)
+            .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if sets.is_empty() {
+            format!(
+                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO NOTHING",
+                schema.table
+            )
+        } else {
+            format!(
+                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
+                schema.table
+            )
+        }
+    }
+
+    fn kind_of(&self, raw: &str) -> ColumnKind {
+        let sql = raw.to_uppercase();
+        if sql.contains("INT") || sql.contains("BOOL") {
+            ColumnKind::Integer
+        } else if sql.contains("CHAR") || sql.contains("TEXT") {
+            ColumnKind::Text
+        } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
+            ColumnKind::Real
+        } else {
+            ColumnKind::Text
+        }
+    }
 
     fn introspect(&self, table: &str) -> String;
 

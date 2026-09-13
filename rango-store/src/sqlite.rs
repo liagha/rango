@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, QueryResult};
 
 use crate::engine::{Dialect, Engine};
-use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
+use crate::{ColumnKind, Store, StoreError};
 
 /// SQLite backend dialect.
 #[derive(Clone)]
@@ -26,47 +26,13 @@ impl Dialect for Sqlite {
         }
     }
 
-    fn create(
-        &self,
-        schema: &Schema,
-        head: &[(Name, Value)],
-        columns: &str,
-        groups: &str,
-    ) -> String {
-        let key = schema.key();
-        let sets = head
-            .iter()
-            .filter(|pair| pair.0 != key)
-            .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if sets.is_empty() {
-            format!(
-                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO NOTHING",
-                schema.table
-            )
-        } else {
-            format!(
-                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
-                schema.table
-            )
-        }
-    }
-
     fn introspect(&self, table: &str) -> String {
         format!("PRAGMA table_info(\"{table}\")")
     }
 
     fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
         let name = row.try_get_by_index::<String>(1)?;
-        let sql = row.try_get_by_index::<String>(2)?.to_uppercase();
-        let kind = if sql.contains("INT") {
-            ColumnKind::Integer
-        } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
-            ColumnKind::Real
-        } else {
-            ColumnKind::Text
-        };
+        let kind = self.kind_of(&row.try_get_by_index::<String>(2)?);
         Ok((name, kind))
     }
 
@@ -120,8 +86,8 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
 mod tests {
     use super::*;
     use crate::{
-        Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Policy, Query, Rule, Sort,
-        Table, Tree,
+        Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Policy, Query, Rule, Schema,
+        Sort, Store, Table, Tree, Value,
     };
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
     use rust_decimal::Decimal;

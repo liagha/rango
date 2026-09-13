@@ -26,33 +26,6 @@ impl Dialect for Postgres {
         }
     }
 
-    fn create(
-        &self,
-        schema: &Schema,
-        head: &[(Name, Value)],
-        columns: &str,
-        groups: &str,
-    ) -> String {
-        let key = schema.key();
-        let sets = head
-            .iter()
-            .filter(|pair| pair.0 != key)
-            .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if sets.is_empty() {
-            format!(
-                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO NOTHING",
-                schema.table
-            )
-        } else {
-            format!(
-                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
-                schema.table
-            )
-        }
-    }
-
     fn introspect(&self, table: &str) -> String {
         format!(
             "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table}' AND table_schema = 'public' ORDER BY ordinal_position"
@@ -61,16 +34,7 @@ impl Dialect for Postgres {
 
     fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
         let name = row.try_get_by_index::<String>(0)?;
-        let sql = row.try_get_by_index::<String>(1)?.to_uppercase();
-        let kind = if sql.contains("INT") || sql.contains("BOOL") {
-            ColumnKind::Integer
-        } else if sql.contains("CHAR") || sql.contains("TEXT") {
-            ColumnKind::Text
-        } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
-            ColumnKind::Real
-        } else {
-            ColumnKind::Text
-        };
+        let kind = self.kind_of(&row.try_get_by_index::<String>(1)?);
         Ok((name, kind))
     }
 
