@@ -10,6 +10,9 @@ pub use rango_store as store;
 /// Command-line interface for migrations, users, and project scaffolding.
 pub mod cli;
 
+/// Versioned migration files on disk.
+pub mod migrations;
+
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
 /// Rango application builder, configured then served or run as a CLI.
@@ -71,6 +74,9 @@ impl Rango {
             }
             Some(word) => match cli::parse([word].into_iter().chain(argv)) {
                 Ok(cli::Command::Project { name }) => finish(cli::project(&name)),
+                Ok(cli::Command::Db(cli::Db::Make { description })) => {
+                    finish(migrations::make(&description))
+                }
                 Ok(cli::Command::Db(db)) => {
                     let store = self.db().await;
                     finish(cli::exec(&store, &schemas, db).await)

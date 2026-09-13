@@ -1085,4 +1085,50 @@ mod tests {
         let dup = vec![(Name("a"), Value::int(1)), (Name("b"), Value::int(2))];
         assert!(db.create(&guarded(), &[dup]).await.is_err());
     }
+
+    #[tokio::test]
+    async fn migrates() {
+        let db = open_db("migrates").await;
+        let pending = vec![
+            crate::Pending {
+                name: "0001_note.sql".into(),
+                sql: "-- boot\nCREATE TABLE note (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  body TEXT NOT NULL\n);\nINSERT INTO note(body) VALUES ('hi');".into(),
+                checksum: "aaa".into(),
+            },
+            crate::Pending {
+                name: "0002_extra.sql".into(),
+                sql: "ALTER TABLE note ADD COLUMN tag TEXT;".into(),
+                checksum: "bbb".into(),
+            },
+        ];
+        assert_eq!(db.migrate(&pending).await.unwrap(), 2);
+        let rows = db
+            .scan_query(
+                &crate::ledger(),
+                &Query { tree: Tree::And(Vec::new()), sort: Vec::new(), page: Page::all(), only: Only::All, mass: None },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(db.migrate(&pending).await.unwrap(), 0);
+        let count = db
+            .fetch("SELECT COUNT(*) FROM note WHERE body = 'hi'", &[], &[Column::Integer])
+            .await
+            .unwrap();
+        assert_eq!(count[0].int(0).unwrap(), 1);
+        assert_eq!(
+            crate::statements(&pending[0].sql),
+            vec![
+                "CREATE TABLE note (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  body TEXT NOT NULL\n)".to_string(),
+                "INSERT INTO note(body) VALUES ('hi')".to_string(),
+            ]
+        );
+        let changed = crate::Pending {
+            name: "0001_note.sql".into(),
+            sql: pending[0].sql.clone(),
+            checksum: "ccc".into(),
+        };
+        let err = db.migrate(&[changed]).await.unwrap_err();
+        assert!(format!("{err}").contains("changed"));
+    }
 }

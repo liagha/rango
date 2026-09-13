@@ -770,6 +770,141 @@ impl Reader for Cells<'_> {
 /// A boxed, `Send`, `'a`-bounded future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// A versioned migration file to apply.
+pub struct Pending {
+    /// File name, e.g. `0001_create_users.sql`.
+    pub name: String,
+    /// SQL body, possibly many statements.
+    pub sql: String,
+    /// Recording checksum of the file content.
+    pub checksum: String,
+}
+
+/// The migrations ledger table: each applied file's name, checksum, and time.
+pub fn ledger() -> Schema {
+    Schema {
+        table: Table("_migrations"),
+        fields: vec![
+            Field::key::<String>("name"),
+            Field::str("checksum"),
+            Field::str("applied_at"),
+        ],
+        rules: Vec::new(),
+    }
+}
+
+/// Splits SQL on top-level semicolons, ignoring those inside single and double
+/// quoted strings, dollar quotes, and comments.
+pub(crate) fn statements(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = Vec::new();
+    let mut stmt = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        match ch {
+            '\'' | '"' => {
+                stmt.push(ch);
+                at += 1;
+                while at < chars.len() {
+                    let c = chars[at];
+                    if c == ch && at + 1 < chars.len() && chars[at + 1] == ch {
+                        stmt.push(c);
+                        stmt.push(c);
+                        at += 2;
+                    } else if c == ch {
+                        stmt.push(c);
+                        at += 1;
+                        break;
+                    } else {
+                        stmt.push(c);
+                        at += 1;
+                    }
+                }
+            }
+            '$' => {
+                if let Some(end) = dollar(&chars, at) {
+                    let delim: String = chars[at..=end].iter().collect();
+                    stmt.push_str(&delim);
+                    let mut look = at + delim.len();
+                    let close = loop {
+                        if look + delim.len() > chars.len() {
+                            break None;
+                        }
+                        if chars[look..look + delim.len()].iter().collect::<String>() == delim {
+                            break Some(look);
+                        }
+                        look += 1;
+                    };
+                    match close {
+                        Some(look) => {
+                            stmt.push_str(
+                                &chars[at + delim.len()..look + delim.len()].iter().collect::<String>(),
+                            );
+                            at = look + delim.len();
+                        }
+                        None => {
+                            stmt.push_str(&chars[at + delim.len()..].iter().collect::<String>());
+                            at = chars.len();
+                        }
+                    }
+                } else {
+                    stmt.push('$');
+                    at += 1;
+                }
+            }
+            '-' if at + 1 < chars.len() && chars[at + 1] == '-' => {
+                while at < chars.len() && chars[at] != '\n' {
+                    at += 1;
+                }
+            }
+            '/' if at + 1 < chars.len() && chars[at + 1] == '*' => {
+                at += 2;
+                while at < chars.len() {
+                    if chars[at] == '*' && at + 1 < chars.len() && chars[at + 1] == '/' {
+                        at += 2;
+                        break;
+                    }
+                    at += 1;
+                }
+            }
+            ';' => {
+                let sql = stmt.trim();
+                if !sql.is_empty() {
+                    out.push(sql.into());
+                }
+                stmt.clear();
+                at += 1;
+            }
+            _ => {
+                stmt.push(ch);
+                at += 1;
+            }
+        }
+    }
+    let tail = stmt.trim();
+    if !tail.is_empty() {
+        out.push(tail.into());
+    }
+    out
+}
+
+fn dollar(chars: &[char], at: usize) -> Option<usize> {
+    let head = at + 1 < chars.len() && (chars[at + 1].is_ascii_alphabetic() || chars[at + 1] == '_' || chars[at + 1] == '$');
+    if !head {
+        return None;
+    }
+    let mut j = at + 1;
+    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+        j += 1;
+    }
+    if j < chars.len() && chars[j] == '$' {
+        Some(j)
+    } else {
+        None
+    }
+}
+
 /// A database backend: SQL and typed schema operations over a connection.
 pub trait Store: Send + Sync + 'static {
     /// Runs `sql` with `params`, returning rows affected.
@@ -932,6 +1067,82 @@ pub trait Store: Send + Sync + 'static {
         })
     }
 
+    /// Applies every unapplied [`Pending`] migration in order inside one
+    /// transaction, recording each applied file's checksum. A pending file
+    /// whose recorded checksum no longer matches is a hard error — applied
+    /// files are immutable, repairs are forward migrations.
+    fn migrate<'a>(
+        &'a self,
+        pending: &'a [Pending],
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        Box::pin(async move {
+            let ledger = ledger();
+            self.define(&ledger).await?;
+            let rows = self
+                .scan_query(
+                    &ledger,
+                    &Query {
+                        tree: Tree::And(Vec::new()),
+                        sort: Vec::new(),
+                        page: Page::all(),
+                        only: Only::All,
+                        mass: None,
+                    },
+                )
+                .await?;
+            let mut recorded = std::collections::HashMap::new();
+            for row in rows {
+                let name = row.opt_str(0).unwrap_or_default();
+                let checksum = row.opt_str(1).unwrap_or_default();
+                recorded.insert(name, checksum);
+            }
+            let mut todo = Vec::new();
+            for file in pending {
+                match recorded.get(&file.name) {
+                    Some(checksum) if checksum == &file.checksum => {}
+                    Some(_) => {
+                        return Err(StoreError::Value(format!(
+                            "migration {} changed after it was applied — repairs are forward migrations",
+                            file.name
+                        )));
+                    }
+                    None => todo.push(file),
+                }
+            }
+            let deal = self.deal().await?;
+            match async {
+                let mut applied = 0;
+                for file in &todo {
+                    for sql in statements(&file.sql) {
+                        deal.execute(&sql, &[]).await?;
+                    }
+                    deal.create(
+                        &ledger,
+                        &[vec![
+                            (Name("name"), Value::str(&file.name)),
+                            (Name("checksum"), Value::str(&file.checksum)),
+                            (Name("applied_at"), Value::str(Utc::now().to_rfc3339())),
+                        ]],
+                    )
+                    .await?;
+                    applied += 1;
+                }
+                Ok::<usize, StoreError>(applied)
+            }
+            .await
+            {
+                Ok(applied) => {
+                    deal.settle(true).await?;
+                    Ok(applied)
+                }
+                Err(err) => {
+                    let _ = deal.settle(false).await;
+                    Err(err)
+                }
+            }
+        })
+    }
+
     /// Opens a transaction as an independent [`Store`].
     fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
         Box::pin(async { Err(StoreError::Unsupported("deal".into())) })
@@ -963,6 +1174,26 @@ mod tests {
         assert_eq!(Value::from(&Some("a".to_string())), Value::Str("a".into()));
         let none: Option<String> = None;
         assert_eq!(Value::from(&none), Value::Null);
+    }
+
+    #[test]
+    fn split() {
+        let sql = "-- hello; world\nCREATE TABLE t (a TEXT, b TEXT DEFAULT 'x;y'); \n\nINSERT INTO t VALUES ('a;b');\n/* block; comment */ SELECT 1;";
+        assert_eq!(
+            statements(sql),
+            vec![
+                "CREATE TABLE t (a TEXT, b TEXT DEFAULT 'x;y')".to_string(),
+                "INSERT INTO t VALUES ('a;b')".to_string(),
+                "SELECT 1".to_string(),
+            ]
+        );
+        let tag = "SELECT $body$ ; $body$; SELECT 2;";
+        assert_eq!(
+            statements(tag),
+            vec!["SELECT $body$ ; $body$".to_string(), "SELECT 2".to_string()]
+        );
+        assert_eq!(statements(""), Vec::<String>::new());
+        assert_eq!(statements("SELECT 1"), vec!["SELECT 1".to_string()]);
     }
 
     #[test]

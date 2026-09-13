@@ -21,6 +21,15 @@ pub enum Db {
         /// Drop existing tables before migrating.
         drop: bool,
     },
+    /// Write the next versioned migration file.
+    Make {
+        /// Human description turned into the file name.
+        description: String,
+    },
+    /// Apply every unapplied migration file in order.
+    Run,
+    /// Report which migration files are applied, pending, or changed.
+    Status,
     /// Create a user with the given credentials.
     Create {
         /// Name for the new user.
@@ -63,16 +72,31 @@ impl Fail {
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
     let mut args = args.peekable();
     match args.next().as_deref() {
-        Some("migrate") => {
-            let mut drop = false;
-            while let Some(arg) = args.next() {
-                match arg.as_str() {
-                    "--drop" => drop = true,
-                    other => return Err(Fail::Usage(format!("unknown argument {other}"))),
+        Some("migrate") => match args.next().as_deref() {
+            None => Ok(Command::Db(Db::Migrate { drop: false })),
+            Some("--drop") => match args.next() {
+                None => Ok(Command::Db(Db::Migrate { drop: true })),
+                Some(other) => Err(Fail::Usage(format!("unknown argument {other}"))),
+            },
+            Some("make") => {
+                let description = args
+                    .next()
+                    .ok_or_else(|| Fail::Usage("migrate make needs a DESCRIPTION".into()))?;
+                match args.next() {
+                    None => Ok(Command::Db(Db::Make { description })),
+                    Some(other) => Err(Fail::Usage(format!("unknown argument {other}"))),
                 }
             }
-            Ok(Command::Db(Db::Migrate { drop }))
-        }
+            Some("run") => match args.next() {
+                None => Ok(Command::Db(Db::Run)),
+                Some(other) => Err(Fail::Usage(format!("unknown argument {other}"))),
+            },
+            Some("status") => match args.next() {
+                None => Ok(Command::Db(Db::Status)),
+                Some(other) => Err(Fail::Usage(format!("unknown argument {other}"))),
+            },
+            Some(other) => Err(Fail::Usage(format!("unknown argument {other}"))),
+        },
         Some("create") => match args.next().as_deref() {
             Some("user") => {
                 let mut username = None;
@@ -115,7 +139,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
 
 /// Text shown by `--help` and on unknown commands.
 pub fn usage() -> &'static str {
-    "usage: app [command]\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]\n  create project NAME"
+    "usage: app [command]\ncommands:\n  migrate [--drop]\n  migrate make DESCRIPTION\n  migrate run\n  migrate status\n  create user [--username NAME] [--password PASS] [--super]\n  create project NAME"
 }
 
 /// Run a parsed command against the store.
@@ -129,6 +153,9 @@ pub async fn exec(
             .await
             .map(|count| format!("migrated {count}"))
             .map_err(|fail| Fail::Error(format!("migrate failed: {fail}"))),
+        Db::Make { description } => crate::migrations::make(&description),
+        Db::Run => crate::migrations::run(store).await,
+        Db::Status => crate::migrations::status(store).await,
         Db::Create {
             username,
             password,
@@ -257,6 +284,23 @@ mod tests {
             Command::Db(Db::Migrate { drop: true })
         ));
         assert!(parse(args(&["migrate", "--bogus"])).is_err());
+        assert!(matches!(
+            parse(args(&["migrate", "run"])).unwrap(),
+            Command::Db(Db::Run)
+        ));
+        assert!(matches!(
+            parse(args(&["migrate", "status"])).unwrap(),
+            Command::Db(Db::Status)
+        ));
+        let Command::Db(Db::Make { description }) =
+            parse(args(&["migrate", "make", "create notes"])).unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(description, "create notes");
+        assert!(parse(args(&["migrate", "make"])).is_err());
+        assert!(parse(args(&["migrate", "run", "extra"])).is_err());
+        assert!(parse(args(&["migrate", "bogus"])).is_err());
     }
 
     #[test]

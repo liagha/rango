@@ -1,6 +1,6 @@
 # 9. Versioned, forward-only migrations
 
-Status: Accepted (Phase 1 — implementation planned)
+Status: Accepted
 
 ## Context
 

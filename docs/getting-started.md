@@ -312,6 +312,9 @@ Run the binary with no arguments to start the server. Any word argument is a com
 |----------------------------------------------------|-----------------------------------|
 | `your_app`                                         | Start the web server              |
 | `your_app migrate [--drop]`                        | Create or update tables           |
+| `your_app migrate make DESCRIPTION`                | Scaffold the next versioned migration file |
+| `your_app migrate run`                             | Apply pending versioned migrations |
+| `your_app migrate status`                          | Show applied and pending migrations |
 | `your_app create user [--username NAME] [--password PASS] [--super]` | Create a user   |
 | `your_app create project NAME`                     | Scaffold a new project in `./NAME`|
 | `your_app --help`                                  | Show this usage                   |

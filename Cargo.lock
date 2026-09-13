@@ -1395,6 +1395,7 @@ dependencies = [
  "rango-authentication",
  "rango-core",
  "rango-store",
+ "sha2",
  "tokio",
  "tracing",
 ]

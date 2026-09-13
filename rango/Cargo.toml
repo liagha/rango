@@ -19,3 +19,4 @@ rango-admin.workspace = true
 rango-authentication.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+sha2.workspace = true
