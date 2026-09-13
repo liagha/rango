@@ -8,14 +8,18 @@ use sea_orm::{
 use tokio::sync::Mutex;
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Order, Query, Row,
-    Rows, Schema, Sort, Store, StoreError, Tree, Value,
+    BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Query, Row, Rows,
+    Schema, Store, StoreError, Tree, Value,
 };
 
+/// SQL dialect: backend grammar, schema rendering, and row decoding.
 pub(crate) trait Dialect: Clone + Send + Sync + 'static {
     fn backend(&self) -> DbBackend;
+
     fn mark(&self, at: usize) -> String;
+
     fn sql(&self, dtype: &str) -> &'static str;
+
     fn primary(&self, auto: bool, dtype: &str) -> String {
         match (self.backend(), auto) {
             (DbBackend::Sqlite, true) => "INTEGER PRIMARY KEY AUTOINCREMENT".into(),
@@ -23,6 +27,175 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
             _ => format!("{} PRIMARY KEY", self.sql(dtype)),
         }
     }
+
+    fn column(&self, field: &Field) -> String {
+        let mut base = if field.id {
+            self.primary(true, field.dtype)
+        } else if field.keyed {
+            self.primary(false, field.dtype)
+        } else {
+            let mut text = self.sql(field.dtype).to_string();
+            if field.unique {
+                text.push_str(" UNIQUE");
+            }
+            if !field.optional {
+                text.push_str(" NOT NULL");
+            }
+            if field.default.is_some() {
+                text.push_str(&format!(" DEFAULT {}", field.initial().literal()));
+            }
+            text
+        };
+        if let Some((table, column)) = field.reference() {
+            let policy = match field.on_delete.name.as_str() {
+                "cascade" => " ON DELETE CASCADE",
+                "protect" => " ON DELETE RESTRICT",
+                "set_null" => " ON DELETE SET NULL",
+                _ => "",
+            };
+            base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\"){policy}"));
+        }
+        format!("\"{}\" {}", field.name, base)
+    }
+
+    fn ddl(&self, schema: &Schema) -> String {
+        let columns = schema
+            .fields
+            .iter()
+            .filter(|field| !field.many)
+            .map(|field| self.column(field))
+            .collect::<Vec<_>>();
+        format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
+            schema.table,
+            columns.join(", ")
+        )
+    }
+
+    fn alter(&self, schema: &Schema, have: &[Column]) -> Vec<String> {
+        let moved = schema.moved(have);
+        let mut out = Vec::new();
+        for field in &schema.fields {
+            if field.id || field.many {
+                continue;
+            }
+            let known = have.iter().any(|col| col.name == field.name.as_str());
+            let renamed = moved.iter().any(|(_, name)| name == field.name.as_str());
+            if !known && !renamed {
+                out.push(format!(
+                    "ALTER TABLE \"{}\" ADD COLUMN {}",
+                    schema.table,
+                    self.column(field)
+                ));
+            }
+        }
+        out
+    }
+
+    fn leaf(
+        &self,
+        paths: &HashMap<Name, (String, Vec<Value>)>,
+        filter: &Filter,
+        params: &mut Vec<Value>,
+    ) -> String {
+        if let Some((fragment, extra)) = paths.get(&filter.field) {
+            let base = params.len();
+            params.extend(extra.iter().cloned());
+            let mark = self.mark(base);
+            return fragment.replacen("{mark}", &mark, 1);
+        }
+        match filter.op {
+            Op::Eq => {
+                params.push(filter.value.clone());
+                format!("\"{}\" = {}", filter.field, self.mark(params.len() - 1))
+            }
+            Op::Ne => {
+                params.push(filter.value.clone());
+                format!("\"{}\" != {}", filter.field, self.mark(params.len() - 1))
+            }
+            Op::More => {
+                params.push(filter.value.clone());
+                format!("\"{}\" > {}", filter.field, self.mark(params.len() - 1))
+            }
+            Op::Less => {
+                params.push(filter.value.clone());
+                format!("\"{}\" < {}", filter.field, self.mark(params.len() - 1))
+            }
+            Op::Like => {
+                params.push(filter.value.clone());
+                format!(
+                    "LOWER(\"{}\") LIKE {}",
+                    filter.field,
+                    self.mark(params.len() - 1)
+                )
+            }
+            Op::Bare => format!("\"{}\" IS NULL", filter.field),
+            Op::At => match &filter.value {
+                Value::DateTime(at) => {
+                    let start = at.date_naive().and_time(NaiveTime::MIN).and_utc();
+                    let end = start + TimeDelta::days(1);
+                    params.push(Value::datetime(start));
+                    let lo = self.mark(params.len() - 1);
+                    params.push(Value::datetime(end));
+                    let hi = self.mark(params.len() - 1);
+                    format!("\"{}\" >= {lo} AND \"{}\" < {hi}", filter.field, filter.field)
+                }
+                _ => "1 = 0".into(),
+            },
+        }
+    }
+
+    fn tree(
+        &self,
+        paths: &HashMap<Name, (String, Vec<Value>)>,
+        node: &Tree,
+        params: &mut Vec<Value>,
+    ) -> String {
+        match node {
+            Tree::Leaf(filter) => self.leaf(paths, filter, params),
+            Tree::And(parts) => {
+                let mut out = Vec::new();
+                for part in parts {
+                    let cond = self.tree(paths, part, params);
+                    if !cond.is_empty() {
+                        out.push(cond);
+                    }
+                }
+                if out.len() == 1 {
+                    out.pop().unwrap_or_default()
+                } else if out.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", out.join(" AND "))
+                }
+            }
+            Tree::Or(parts) => {
+                let mut out = Vec::new();
+                for part in parts {
+                    let cond = self.tree(paths, part, params);
+                    if !cond.is_empty() {
+                        out.push(cond);
+                    }
+                }
+                if out.len() == 1 {
+                    out.pop().unwrap_or_default()
+                } else if out.is_empty() {
+                    "1 = 0".into()
+                } else {
+                    format!("({})", out.join(" OR "))
+                }
+            }
+            Tree::Cut(inner) => {
+                let cond = self.tree(paths, inner, params);
+                if cond.is_empty() {
+                    "1 = 1".into()
+                } else {
+                    format!("NOT ({cond})")
+                }
+            }
+        }
+    }
+
     fn create(
         &self,
         schema: &Schema,
@@ -30,879 +203,565 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
         columns: &str,
         groups: &str,
     ) -> String;
+
     fn introspect(&self, table: &str) -> String;
-    fn name_at(&self) -> usize;
+
+    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr>;
+
     fn fks(&self, table: &str) -> String;
-    fn fk_at(&self) -> usize;
-    fn type_at(&self) -> usize;
-    fn reflect(&self, sql: &str) -> ColumnKind;
+
+    fn foreign(&self, row: &QueryResult) -> Option<String>;
+
     fn latest(&self) -> Option<&'static str>;
+
     fn sum(&self, kind: ColumnKind, column: &str) -> String;
+
     fn mean(&self, kind: ColumnKind, column: &str) -> String;
 }
 
-pub(crate) fn sql_err(err: DbErr) -> StoreError {
-    let msg = err.to_string();
-    if msg.contains("(code: 787)")
-        || msg.contains("FOREIGN KEY constraint failed")
-        || msg.contains("23503")
-    {
-        StoreError::Reference(msg)
-    } else {
-        StoreError::Sql(msg)
-    }
-}
-
-pub(crate) fn bind(values: &[Value]) -> Vec<SeaValue> {
-    values
-        .iter()
-        .map(|value| match value {
-            Value::Null => SeaValue::String(None),
-            Value::Int(value) => SeaValue::BigInt(Some(*value)),
-            Value::Float(value) => SeaValue::Double(Some(*value)),
-            Value::Str(value) => SeaValue::String(Some(Box::new(value.clone()))),
-            Value::Bool(value) => SeaValue::BigInt(Some(*value as i64)),
-            Value::DateTime(at) => SeaValue::BigInt(Some(at.timestamp())),
-            Value::Decimal(value) => SeaValue::String(Some(Box::new(value.to_string()))),
-        })
-        .collect()
-}
-
-pub(crate) fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
-    let mut values = Vec::with_capacity(kinds.len());
-    for (i, kind) in kinds.iter().enumerate() {
-        let value = match kind {
-            ColumnKind::Integer => match row.try_get_by_index::<Option<i64>>(i) {
-                Ok(Some(value)) => Value::Int(value),
-                Ok(None) => Value::Null,
-                Err(fail) => return Err(sql_err(fail)),
-            },
-            ColumnKind::Real => match row.try_get_by_index::<Option<f64>>(i) {
-                Ok(Some(value)) => Value::Float(value),
-                Ok(None) => Value::Null,
-                Err(fail) => return Err(sql_err(fail)),
-            },
-            ColumnKind::Text => match row.try_get_by_index::<Option<String>>(i) {
-                Ok(Some(value)) => Value::Str(value),
-                Ok(None) => Value::Null,
-                Err(fail) => return Err(sql_err(fail)),
-            },
-        };
-        values.push(value);
-    }
-    Ok(Row { values })
-}
-
-pub(crate) fn leaf<D: Dialect>(
-    dialect: &D,
-    paths: &HashMap<Name, (String, Vec<Value>)>,
-    filter: &Filter,
-    params: &mut Vec<Value>,
-) -> String {
-    if let Some((fragment, extra)) = paths.get(&filter.field) {
-        let base = params.len();
-        params.extend(extra.iter().cloned());
-        let mark = dialect.mark(base);
-        return fragment.replace("{mark}", &mark);
-    }
-    match filter.op {
-        Op::Eq => {
-            params.push(filter.value.clone());
-            format!("\"{}\" = {}", filter.field, dialect.mark(params.len() - 1))
-        }
-        Op::Ne => {
-            params.push(filter.value.clone());
-            format!("\"{}\" != {}", filter.field, dialect.mark(params.len() - 1))
-        }
-        Op::More => {
-            params.push(filter.value.clone());
-            format!("\"{}\" > {}", filter.field, dialect.mark(params.len() - 1))
-        }
-        Op::Less => {
-            params.push(filter.value.clone());
-            format!("\"{}\" < {}", filter.field, dialect.mark(params.len() - 1))
-        }
-        Op::Like => {
-            params.push(filter.value.clone());
-            format!(
-                "LOWER(\"{}\") LIKE {}",
-                filter.field,
-                dialect.mark(params.len() - 1)
-            )
-        }
-        Op::Bare => format!("\"{}\" IS NULL", filter.field),
-        Op::At => match &filter.value {
-            Value::DateTime(at) => {
-                let start = at.date_naive().and_time(NaiveTime::MIN).and_utc();
-                let end = start + TimeDelta::days(1);
-                params.push(Value::datetime(start));
-                let lo = dialect.mark(params.len() - 1);
-                params.push(Value::datetime(end));
-                let hi = dialect.mark(params.len() - 1);
-                format!(
-                    "\"{}\" >= {lo} AND \"{}\" < {hi}",
-                    filter.field, filter.field
-                )
-            }
-            _ => "1 = 0".into(),
-        },
-    }
-}
-
-pub(crate) fn tree<D: Dialect>(
-    dialect: &D,
-    paths: &HashMap<Name, (String, Vec<Value>)>,
-    node: &Tree,
-    params: &mut Vec<Value>,
-) -> String {
-    match node {
-        Tree::Leaf(filter) => leaf(dialect, paths, filter, params),
-        Tree::And(parts) => {
-            let mut out = Vec::new();
-            for node in parts {
-                let cond = tree(dialect, paths, node, params);
-                if !cond.is_empty() {
-                    out.push(cond);
+impl Tree {
+    fn leaves<'a>(&'a self, out: &mut Vec<&'a Filter>) {
+        match self {
+            Tree::Leaf(filter) => {
+                if filter.field.as_str().contains("__") {
+                    out.push(filter);
                 }
             }
-            if out.len() == 1 {
-                out.pop().unwrap_or_default()
-            } else if out.is_empty() {
-                String::new()
-            } else {
-                format!("({})", out.join(" AND "))
-            }
-        }
-        Tree::Or(parts) => {
-            let mut out = Vec::new();
-            for node in parts {
-                let cond = tree(dialect, paths, node, params);
-                if !cond.is_empty() {
-                    out.push(cond);
+            Tree::And(parts) | Tree::Or(parts) => {
+                for part in parts {
+                    part.leaves(out);
                 }
             }
-            if out.len() == 1 {
-                out.pop().unwrap_or_default()
-            } else if out.is_empty() {
-                "1 = 0".into()
-            } else {
-                format!("({})", out.join(" OR "))
-            }
-        }
-        Tree::Cut(inner) => {
-            let cond = tree(dialect, paths, inner, params);
-            if cond.is_empty() {
-                "1 = 1".into()
-            } else {
-                format!("NOT ({cond})")
-            }
+            Tree::Cut(inner) => inner.leaves(out),
         }
     }
 }
 
-pub(crate) fn kind_of(schema: &Schema, name: Name) -> Result<ColumnKind, StoreError> {
-    let field = schema
-        .fields
-        .iter()
-        .find(|field| field.name == name)
-        .ok_or_else(|| StoreError::Value(format!("unknown column {name}")))?;
-    if field.many {
-        return Err(StoreError::Value(format!("virtual column {name}")));
-    }
-    Ok(affinity(field.dtype))
+/// Runs statements over a single connection.
+pub(crate) struct Runner<C> {
+    conn: C,
 }
 
-pub(crate) fn sorts(sorts: &[Sort], schema: &Schema) -> String {
-    if sorts.is_empty() {
-        return format!("\"{}\"", schema.key());
-    }
-    sorts
-        .iter()
-        .map(|sort| match sort.order {
-            Order::Asc => format!("\"{}\"", sort.field),
-            Order::Desc => format!("\"{}\" DESC", sort.field),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-pub(crate) fn statement<D: Dialect>(dialect: &D, sql: &str, params: &[Value]) -> Statement {
-    Statement::from_sql_and_values(dialect.backend(), sql, bind(params))
-}
-
-pub(crate) fn affinity(dtype: &str) -> ColumnKind {
-    match dtype {
-        "INTEGER" => ColumnKind::Integer,
-        "REAL" => ColumnKind::Real,
-        _ => ColumnKind::Text,
+impl<C> Runner<C> {
+    pub(crate) fn new(conn: C) -> Self {
+        Runner { conn }
     }
 }
 
-pub(crate) fn literal(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".into(),
-        Value::Int(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Str(value) => format!("'{}'", value.replace('\'', "''")),
-        Value::Bool(value) => {
-            if *value {
-                "1".into()
-            } else {
-                "0".into()
-            }
-        }
-        Value::DateTime(at) => at.timestamp().to_string(),
-        Value::Decimal(value) => format!("'{value}'"),
-    }
-}
-
-pub(crate) fn column<D: Dialect>(dialect: &D, field: &Field) -> String {
-    let mut base = if field.id {
-        dialect.primary(true, field.dtype)
-    } else if field.keyed {
-        dialect.primary(false, field.dtype)
-    } else {
-        let mut base = dialect.sql(field.dtype).to_string();
-        if field.unique {
-            base.push_str(" UNIQUE");
-        }
-        if !field.optional {
-            base.push_str(" NOT NULL");
-        }
-        if field.default.is_some() {
-            base.push_str(&format!(" DEFAULT {}", literal(&field.initial())));
-        }
-        base
-    };
-    if let Some((table, column)) = field.reference() {
-        let policy = match field.on_delete.name.as_str() {
-            "cascade" => " ON DELETE CASCADE",
-            "protect" => " ON DELETE RESTRICT",
-            "set_null" => " ON DELETE SET NULL",
-            _ => "",
-        };
-        base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\"){policy}"));
-    }
-    format!("\"{}\" {}", field.name, base)
-}
-
-pub(crate) fn kinds(schema: &Schema) -> Vec<ColumnKind> {
-    schema
-        .fields
-        .iter()
-        .filter(|field| !field.many)
-        .map(|field| affinity(field.dtype))
-        .collect()
-}
-
-pub(crate) fn ddl<D: Dialect>(dialect: &D, schema: &Schema) -> String {
-    let columns: Vec<String> = schema
-        .fields
-        .iter()
-        .filter(|field| !field.many)
-        .map(|field| column(dialect, field))
-        .collect();
-    format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-        schema.table,
-        columns.join(", ")
-    )
-}
-
-pub(crate) fn alter<D: Dialect>(dialect: &D, schema: &Schema, have: &[Column]) -> Vec<String> {
-    let moved = moved(schema, have);
-    let mut out = Vec::new();
-    for field in &schema.fields {
-        if field.id || field.many {
-            continue;
-        }
-        if !have.iter().any(|col| col.name == field.name.as_str())
-            && !moved.iter().any(|(_, name)| name == field.name.as_str())
-        {
-            out.push(format!(
-                "ALTER TABLE \"{}\" ADD COLUMN {}",
-                schema.table,
-                column(dialect, field)
-            ));
-        }
-    }
-    out
-}
-
-pub(crate) fn drop(schema: &Schema, have: &[Column], refs: &[String]) -> Vec<String> {
-    let moved = moved(schema, have);
-    let mut out = Vec::new();
-    for col in have {
-        if col.name == "id" || refs.contains(&col.name) {
-            continue;
-        }
-        if !schema
-            .fields
+impl<C: ConnectionTrait> Runner<C> {
+    fn binds(values: &[Value]) -> Vec<SeaValue> {
+        values
             .iter()
-            .any(|field| field.name.as_str() == col.name.as_str())
-            && !moved.iter().any(|(name, _)| name == &col.name)
-        {
-            out.push(format!(
-                "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
-                schema.table, col.name
-            ));
-        }
-    }
-    out
-}
-
-pub(crate) fn rename(schema: &Schema, have: &[Column], refs: &[String]) -> Vec<String> {
-    moved(schema, have)
-        .into_iter()
-        .filter(|(old, _)| !refs.contains(old))
-        .map(|(old, name)| {
-            format!(
-                "ALTER TABLE \"{}\" RENAME COLUMN \"{old}\" TO \"{name}\"",
-                schema.table
-            )
-        })
-        .collect()
-}
-
-pub(crate) fn moved(schema: &Schema, have: &[Column]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for kind in [ColumnKind::Integer, ColumnKind::Real, ColumnKind::Text] {
-        let gone: Vec<&String> = have
-            .iter()
-            .filter(|col| {
-                col.name != "id"
-                    && col.kind == kind
-                    && !schema
-                        .fields
-                        .iter()
-                        .any(|field| field.name.as_str() == col.name.as_str())
+            .map(|value| match value {
+                Value::Null => SeaValue::String(None),
+                Value::Int(v) => SeaValue::BigInt(Some(*v)),
+                Value::Float(v) => SeaValue::Double(Some(*v)),
+                Value::Str(v) => SeaValue::String(Some(Box::new(v.clone()))),
+                Value::Bool(v) => SeaValue::BigInt(Some(*v as i64)),
+                Value::DateTime(v) => SeaValue::BigInt(Some(v.timestamp())),
+                Value::Decimal(v) => SeaValue::String(Some(Box::new(v.to_string()))),
             })
-            .map(|col| &col.name)
-            .collect();
-        let fresh: Vec<&Field> = schema
-            .fields
-            .iter()
-            .filter(|field| {
-                !field.id
-                    && !field.many
-                    && affinity(field.dtype) == kind
-                    && !have.iter().any(|col| col.name == field.name.as_str())
-            })
-            .collect();
-        if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
-            out.push(((*old).clone(), new.name.to_string()));
-        }
+            .collect()
     }
-    out
-}
 
-async fn run_execute<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    sql: &str,
-    params: &[Value],
-) -> Result<usize, StoreError> {
-    conn.execute(statement(dialect, sql, params))
-        .await
-        .map(|done| done.rows_affected() as usize)
-        .map_err(sql_err)
-}
+    fn statement<D: Dialect>(dialect: &D, sql: &str, params: &[Value]) -> Statement {
+        Statement::from_sql_and_values(dialect.backend(), sql, Self::binds(params))
+    }
 
-async fn run_fetch<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    sql: &str,
-    params: &[Value],
-    kinds: &[ColumnKind],
-) -> Result<Rows, StoreError> {
-    let rows = conn
-        .query_all(statement(dialect, sql, params))
-        .await
-        .map_err(sql_err)?;
-    rows.iter().map(|row| read(row, kinds)).collect()
-}
+    fn row(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
+        let mut values = Vec::with_capacity(kinds.len());
+        for (i, kind) in kinds.iter().enumerate() {
+            let value = match kind {
+                ColumnKind::Integer => match row.try_get_by_index::<Option<i64>>(i) {
+                    Ok(Some(v)) => Value::int(v),
+                    Ok(None) => Value::Null,
+                    Err(err) => return Err(StoreError::from(err)),
+                },
+                ColumnKind::Real => match row.try_get_by_index::<Option<f64>>(i) {
+                    Ok(Some(v)) => Value::float(v),
+                    Ok(None) => Value::Null,
+                    Err(err) => return Err(StoreError::from(err)),
+                },
+                ColumnKind::Text => match row.try_get_by_index::<Option<String>>(i) {
+                    Ok(Some(v)) => Value::str(v),
+                    Ok(None) => Value::Null,
+                    Err(err) => return Err(StoreError::from(err)),
+                },
+            };
+            values.push(value);
+        }
+        Ok(Row { values })
+    }
 
-async fn resolve_paths<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    query: &Query,
-) -> Result<HashMap<Name, (String, Vec<Value>)>, StoreError> {
-    let mut paths = HashMap::new();
-    let mut seen = Vec::new();
-    collect(&query.tree, &mut seen);
-    for filter in seen {
-        let Some((fk, sub)) = filter.field.as_str().split_once("__") else {
-            continue;
-        };
-        let column = schema
-            .fields
-            .iter()
-            .find(|field| field.name.as_str() == fk)
-            .ok_or_else(|| StoreError::Value(format!("unknown field {fk}")))?;
-        let Some((table, ref_name)) = column.reference() else {
-            return Err(StoreError::Value(format!("{fk} needs a reference")));
-        };
-        let sql = dialect.introspect(table.as_str());
-        let rows = conn
-            .query_all(statement(dialect, &sql, &[]))
+    async fn execute<D: Dialect>(
+        &self,
+        dialect: &D,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<usize, StoreError> {
+        self.conn
+            .execute(Self::statement(dialect, sql, params))
             .await
-            .map_err(sql_err)?;
-        let name_at = dialect.name_at();
-        let has = rows.iter().any(|row| {
-            row.try_get_by_index::<String>(name_at).unwrap_or_default() == sub
-        });
-        if !has {
-            return Err(StoreError::Value(format!("unknown column {sub}")));
-        }
-        let op = match filter.op {
-            Op::Eq => "=",
-            Op::Ne => "!=",
-            Op::More => ">",
-            Op::Less => "<",
-            Op::Like => "LIKE",
-            _ => "=",
-        };
-        let fragment = format!(
-            "\"{fk}\" IN (SELECT \"{ref_name}\" FROM \"{table}\" WHERE \"{sub}\" {op} {{mark}})"
-        );
-        paths.insert(filter.field, (fragment, vec![filter.value.clone()]));
+            .map(|result| result.rows_affected() as usize)
+            .map_err(StoreError::from)
     }
-    Ok(paths)
-}
 
-fn collect<'a>(node: &'a Tree, out: &mut Vec<&'a Filter>) {
-    match node {
-        Tree::Leaf(filter) => {
-            if filter.field.as_str().contains("__") {
-                out.push(filter);
-            }
-        }
-        Tree::And(parts) | Tree::Or(parts) => {
-            for part in parts {
-                collect(part, out);
-            }
-        }
-        Tree::Cut(inner) => collect(inner, out),
+    async fn fetch<D: Dialect>(
+        &self,
+        dialect: &D,
+        sql: &str,
+        params: &[Value],
+        kinds: &[ColumnKind],
+    ) -> Result<Rows, StoreError> {
+        let rows = self
+            .conn
+            .query_all(Self::statement(dialect, sql, params))
+            .await
+            .map_err(StoreError::from)?;
+        rows.iter().map(|row| Self::row(row, kinds)).collect()
     }
-}
 
-async fn run_scan<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    query: &Query,
-) -> Result<Rows, StoreError> {
-    if query.mass.is_some() {
-        return Err(StoreError::Unsupported("mass needs mass()".into()));
-    }
-    let (head, kinds) = match &query.only {
-        Only::All | Only::Lone => ("SELECT *".to_string(), kinds(schema)),
-        Only::Some(names) if names.is_empty() => ("SELECT *".to_string(), kinds(schema)),
-        Only::Some(names) => {
-            let mut kinds = Vec::with_capacity(names.len());
-            for name in names {
-                kinds.push(kind_of(schema, *name)?);
-            }
-            let columns = names
+    async fn paths<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        query: &Query,
+    ) -> Result<HashMap<Name, (String, Vec<Value>)>, StoreError> {
+        let mut seen = Vec::new();
+        query.tree.leaves(&mut seen);
+        let mut paths = HashMap::new();
+        for filter in seen {
+            let Some((fk, sub)) = filter.field.as_str().split_once("__") else {
+                continue;
+            };
+            let field = schema
+                .fields
                 .iter()
-                .map(|name| format!("\"{name}\""))
+                .find(|field| field.name.as_str() == fk)
+                .ok_or_else(|| StoreError::Value(format!("unknown field {fk}")))?;
+            let Some((table, column)) = field.reference() else {
+                return Err(StoreError::Value(format!("{fk} needs a reference")));
+            };
+            let sql = dialect.introspect(table.as_str());
+            let rows = self
+                .conn
+                .query_all(Self::statement(dialect, &sql, &[]))
+                .await
+                .map_err(StoreError::from)?;
+            let has = rows
+                .iter()
+                .any(|row| matches!(dialect.shape(row), Ok((name, _)) if name == sub));
+            if !has {
+                return Err(StoreError::Value(format!("unknown column {sub}")));
+            }
+            let op = match filter.op {
+                Op::Eq => "=",
+                Op::Ne => "!=",
+                Op::More => ">",
+                Op::Less => "<",
+                Op::Like => "LIKE",
+                _ => "=",
+            };
+            let fragment = format!(
+                "\"{fk}\" IN (SELECT \"{column}\" FROM \"{table}\" WHERE \"{sub}\" {op} {{mark}})"
+            );
+            paths.insert(filter.field, (fragment, vec![filter.value.clone()]));
+        }
+        Ok(paths)
+    }
+
+    async fn scan<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        query: &Query,
+    ) -> Result<Rows, StoreError> {
+        if query.mass.is_some() {
+            return Err(StoreError::Unsupported("mass needs mass()".into()));
+        }
+        let (head, kinds) = match &query.only {
+            Only::All | Only::Lone => ("SELECT *".to_string(), schema.kinds()),
+            Only::Some(names) if names.is_empty() => ("SELECT *".to_string(), schema.kinds()),
+            Only::Some(names) => {
+                let mut kinds = Vec::with_capacity(names.len());
+                for name in names {
+                    kinds.push(schema.kind(*name)?);
+                }
+                let columns = names
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (format!("SELECT {columns}"), kinds)
+            }
+        };
+        let mut sql = format!("{head} FROM \"{}\"", schema.table);
+        let paths = self.paths(dialect, schema, query).await?;
+        let mut params = Vec::new();
+        let cond = dialect.tree(&paths, &query.tree, &mut params);
+        if !cond.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&cond);
+        }
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&schema.order(&query.sort));
+        match &query.only {
+            Only::Lone => sql.push_str(" LIMIT 1"),
+            _ => {
+                if query.page.count > 0 {
+                    sql.push_str(&format!(
+                        " LIMIT {} OFFSET {}",
+                        query.page.count, query.page.offset
+                    ));
+                }
+            }
+        }
+        let rows = self
+            .conn
+            .query_all(Self::statement(dialect, &sql, &params))
+            .await
+            .map_err(StoreError::from)?;
+        rows.iter().map(|row| Self::row(row, &kinds)).collect()
+    }
+
+    async fn total<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        query: &Query,
+    ) -> Result<usize, StoreError> {
+        if query.mass.is_some() {
+            return Err(StoreError::Unsupported("mass needs mass()".into()));
+        }
+        let paths = self.paths(dialect, schema, query).await?;
+        let mut params = Vec::new();
+        let cond = dialect.tree(&paths, &query.tree, &mut params);
+        let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", schema.table);
+        if !cond.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&cond);
+        }
+        let rows = self
+            .conn
+            .query_all(Self::statement(dialect, &sql, &params))
+            .await
+            .map_err(StoreError::from)?;
+        match rows
+            .first()
+            .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
+        {
+            Some(found) => Ok(found as usize),
+            None => Err(StoreError::Value("no total".into())),
+        }
+    }
+
+    async fn define<D: Dialect>(&self, dialect: &D, schema: &Schema) -> Result<(), StoreError> {
+        self.execute(dialect, &dialect.ddl(schema), &[]).await.map(|_| ())
+    }
+
+    async fn create<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        batch: &[Vec<(Name, Value)>],
+    ) -> Result<Vec<Key>, StoreError> {
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keyed = schema.fields.iter().any(|field| field.keyed && !field.id);
+        if keyed {
+            let head = &batch[0];
+            let columns = head
+                .iter()
+                .map(|(name, _)| format!("\"{name}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            (format!("SELECT {columns}"), kinds)
+            let mut params = Vec::new();
+            let mut groups = Vec::new();
+            for row in batch {
+                let base = params.len();
+                let marks = (0..row.len())
+                    .map(|at| dialect.mark(base + at))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                groups.push(format!("({marks})"));
+                for (_, value) in row {
+                    params.push(value.clone());
+                }
+            }
+            let sql = dialect.create(schema, head, &columns, &groups.join(", "));
+            self.execute(dialect, &sql, &params).await?;
+            let id = schema.key();
+            let mut keys = Vec::with_capacity(batch.len());
+            for row in batch {
+                let value = row
+                    .iter()
+                    .find(|(name, _)| *name == id)
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| StoreError::Value("missing key".into()))?;
+                keys.push(Key::of(value)?);
+            }
+            Ok(keys)
+        } else {
+            let mut keys = Vec::with_capacity(batch.len());
+            for row in batch {
+                let columns = row
+                    .iter()
+                    .map(|(name, _)| name.as_str().to_string())
+                    .collect::<Vec<_>>();
+                let values = row.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>();
+                keys.push(Key::Int(
+                    self.insert(dialect, schema.table.as_str(), &columns, &values).await?,
+                ));
+            }
+            Ok(keys)
         }
-    };
-    let mut params = Vec::new();
-    let mut sql = format!("{head} FROM \"{}\"", schema.table);
-    let paths = resolve_paths(conn, dialect, schema, query).await?;
-    let cond = tree(dialect, &paths, &query.tree, &mut params);
-    if !cond.is_empty() {
-        sql.push_str(&format!(" WHERE {cond}"));
     }
-    sql.push_str(&format!(" ORDER BY {}", sorts(&query.sort, schema)));
-    if matches!(query.only, Only::Lone) {
-        sql.push_str(" LIMIT 1");
-    } else if query.page.count > 0 {
-        sql.push_str(&format!(
-            " LIMIT {} OFFSET {}",
-            query.page.count, query.page.offset
-        ));
-    }
-    let rows = conn
-        .query_all(statement(dialect, &sql, &params))
-        .await
-        .map_err(sql_err)?;
-    rows.iter().map(|row| read(row, &kinds)).collect()
-}
 
-async fn run_total<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    query: &Query,
-) -> Result<usize, StoreError> {
-    if query.mass.is_some() {
-        return Err(StoreError::Unsupported("mass needs mass()".into()));
-    }
-    let mut params = Vec::new();
-    let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", schema.table);
-    let paths = resolve_paths(conn, dialect, schema, query).await?;
-    let cond = tree(dialect, &paths, &query.tree, &mut params);
-    if !cond.is_empty() {
-        sql.push_str(&format!(" WHERE {cond}"));
-    }
-    let rows = conn
-        .query_all(statement(dialect, &sql, &params))
-        .await
-        .map_err(sql_err)?;
-    match rows.first() {
-        Some(row) => match row.try_get_by_index::<Option<i64>>(0) {
-            Ok(Some(total)) => Ok(total as usize),
-            _ => Err(StoreError::Value("no total".into())),
-        },
-        None => Err(StoreError::Value("no total".into())),
-    }
-}
-
-async fn run_define<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-) -> Result<(), StoreError> {
-    run_execute(conn, dialect, &ddl(dialect, schema), &[])
-        .await
-        .map(|_| ())
-}
-
-async fn run_create<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    batch: &[Vec<(Name, Value)>],
-) -> Result<Vec<Key>, StoreError> {
-    if batch.is_empty() {
-        return Ok(Vec::new());
-    }
-    let keyed = schema.fields.iter().any(|field| field.keyed && !field.id);
-    if keyed {
+    async fn upsert<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        batch: &[Vec<(Name, Value)>],
+    ) -> Result<usize, StoreError> {
+        if batch.is_empty() {
+            return Ok(0);
+        }
+        let keyed = schema.fields.iter().any(|field| field.keyed && !field.id);
+        if !keyed {
+            return Ok(self.create(dialect, schema, batch).await?.len());
+        }
         let head = &batch[0];
         let columns = head
             .iter()
-            .map(|pair| format!("\"{}\"", pair.0))
+            .map(|(name, _)| format!("\"{name}\""))
             .collect::<Vec<_>>()
             .join(", ");
         let mut params = Vec::new();
         let mut groups = Vec::new();
-        for cells in batch {
+        for row in batch {
             let base = params.len();
-            let marks = (0..cells.len())
-                .map(|i| dialect.mark(base + i))
+            let marks = (0..row.len())
+                .map(|at| dialect.mark(base + at))
                 .collect::<Vec<_>>()
                 .join(", ");
             groups.push(format!("({marks})"));
-            params.extend(cells.iter().map(|pair| pair.1.clone()));
-        }
-        let sql = dialect.create(schema, head, &columns, &groups.join(", "));
-        run_execute(conn, dialect, &sql, &params).await?;
-        let id = schema.key();
-        let mut out = Vec::with_capacity(batch.len());
-        for cells in batch {
-            let value = cells.iter().find(|pair| pair.0 == id).map(|pair| &pair.1);
-            match value {
-                Some(value) => out.push(Key::of(value)?),
-                None => return Err(StoreError::Value("missing key".into())),
+            for (_, value) in row {
+                params.push(value.clone());
             }
         }
-        return Ok(out);
+        let sql = dialect.create(schema, head, &columns, &groups.join(", "));
+        self.execute(dialect, &sql, &params).await
     }
-    let mut out = Vec::with_capacity(batch.len());
-    for cells in batch {
-        let columns = cells
-            .iter()
-            .map(|pair| pair.0.to_string())
-            .collect::<Vec<_>>();
-        let params = cells.iter().map(|pair| pair.1.clone()).collect::<Vec<_>>();
-        let id = run_insert(dialect, conn, schema.table.as_str(), &columns, &params).await?;
-        out.push(Key::Int(id));
-    }
-    Ok(out)
-}
 
-async fn run_replace<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    key: &Value,
-    cells: &[(Name, Value)],
-) -> Result<(), StoreError> {
-    let mut sets = Vec::with_capacity(cells.len());
-    let mut params = Vec::with_capacity(cells.len() + 1);
-    for (name, value) in cells {
-        params.push(value.clone());
-        sets.push(format!("\"{name}\" = {}", dialect.mark(params.len() - 1)));
+    async fn replace<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        key: &Value,
+        cells: &[(Name, Value)],
+    ) -> Result<(), StoreError> {
+        let mut params = Vec::new();
+        let mut sets = Vec::new();
+        for (name, value) in cells {
+            params.push(value.clone());
+            sets.push(format!("\"{name}\" = {}", dialect.mark(params.len() - 1)));
+        }
+        params.push(key.clone());
+        let sql = format!(
+            "UPDATE \"{}\" SET {} WHERE \"{}\" = {}",
+            schema.table,
+            sets.join(", "),
+            schema.key(),
+            dialect.mark(params.len() - 1)
+        );
+        self.execute(dialect, &sql, &params).await.map(|_| ())
     }
-    params.push(key.clone());
-    let sql = format!(
-        "UPDATE \"{}\" SET {} WHERE \"{}\" = {}",
-        schema.table,
-        sets.join(", "),
-        schema.key(),
-        dialect.mark(params.len() - 1)
-    );
-    run_execute(conn, dialect, &sql, &params).await?;
-    Ok(())
-}
 
-async fn run_upsert<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    batch: &[Vec<(Name, Value)>],
-) -> Result<usize, StoreError> {
-    if batch.is_empty() {
-        return Ok(0);
+    async fn remove<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        key: &Value,
+    ) -> Result<(), StoreError> {
+        let sql = format!(
+            "DELETE FROM \"{}\" WHERE \"{}\" = {}",
+            schema.table,
+            schema.key(),
+            dialect.mark(0)
+        );
+        self.execute(dialect, &sql, std::slice::from_ref(key))
+            .await
+            .map(|_| ())
     }
-    if !schema.fields.iter().any(|field| field.keyed && !field.id) {
-        let created = run_create(conn, dialect, schema, batch).await?;
-        return Ok(created.len());
-    }
-    let head = &batch[0];
-    let columns = head
-        .iter()
-        .map(|pair| format!("\"{}\"", pair.0))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut params = Vec::new();
-    let mut groups = Vec::new();
-    for cells in batch {
-        let base = params.len();
-        let marks = (0..cells.len())
-            .map(|i| dialect.mark(base + i))
-            .collect::<Vec<_>>()
-            .join(", ");
-        groups.push(format!("({marks})"));
-        params.extend(cells.iter().map(|pair| pair.1.clone()));
-    }
-    let key = schema.key();
-    let sets = head
-        .iter()
-        .filter(|pair| pair.0 != key)
-        .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "INSERT INTO \"{}\" ({columns}) VALUES {} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
-        schema.table,
-        groups.join(", ")
-    );
-    run_execute(conn, dialect, &sql, &params).await
-}
 
-async fn run_remove<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    key: &Value,
-) -> Result<(), StoreError> {
-    let sql = format!(
-        "DELETE FROM \"{}\" WHERE \"{}\" = {}",
-        schema.table,
-        schema.key(),
-        dialect.mark(0)
-    );
-    run_execute(conn, dialect, &sql, std::slice::from_ref(key)).await?;
-    Ok(())
-}
-
-async fn run_evolve<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    trim: bool,
-) -> Result<usize, StoreError> {
-    let mut done = 0;
-    run_define(conn, dialect, schema).await?;
-    done += 1;
-    let have = run_columns(conn, dialect, schema.table.as_str()).await?;
-    let refs = referenced(conn, dialect, schema.table.as_str()).await?;
-    for sql in rename(schema, &have, &refs) {
-        run_execute(conn, dialect, &sql, &[]).await?;
-        done += 1;
-    }
-    for sql in alter(dialect, schema, &have) {
-        run_execute(conn, dialect, &sql, &[]).await?;
-        done += 1;
-    }
-    if trim {
-        for sql in drop(schema, &have, &refs) {
-            run_execute(conn, dialect, &sql, &[]).await?;
+    async fn evolve<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        trim: bool,
+    ) -> Result<usize, StoreError> {
+        let mut done = 0;
+        done += usize::from(self.define(dialect, schema).await.is_ok());
+        let have = self.columns(dialect, schema.table.as_str()).await?;
+        let refs = self.refs(dialect, schema.table.as_str()).await?;
+        for sql in schema.rename(&have, &refs) {
+            self.execute(dialect, &sql, &[]).await?;
             done += 1;
         }
-    }
-    Ok(done)
-}
-
-async fn run_mass<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    schema: &Schema,
-    query: &Query,
-) -> Result<Value, StoreError> {
-    let mass = match query.mass {
-        Some(mass) => mass,
-        None => return Err(StoreError::Unsupported("mass needs a mass".into())),
-    };
-    let (head, kinds) = match mass {
-        Mass::Count => ("COUNT(*)".to_string(), vec![ColumnKind::Integer]),
-        Mass::Sum(name) => {
-            let kind = kind_of(schema, name)?;
-            (dialect.sum(kind, name.as_str()), vec![kind])
+        for sql in dialect.alter(schema, &have) {
+            self.execute(dialect, &sql, &[]).await?;
+            done += 1;
         }
-        Mass::Mean(name) => (
-            dialect.mean(kind_of(schema, name)?, name.as_str()),
-            vec![ColumnKind::Real],
-        ),
-        Mass::Low(name) => (format!("MIN(\"{name}\")"), vec![kind_of(schema, name)?]),
-        Mass::High(name) => (format!("MAX(\"{name}\")"), vec![kind_of(schema, name)?]),
-    };
-    let mut params = Vec::new();
-    let mut sql = format!("SELECT {head} FROM \"{}\"", schema.table);
-    let paths = resolve_paths(conn, dialect, schema, query).await?;
-    let cond = tree(dialect, &paths, &query.tree, &mut params);
-    if !cond.is_empty() {
-        sql.push_str(&format!(" WHERE {cond}"));
+        if trim {
+            for sql in schema.drop(&have, &refs) {
+                self.execute(dialect, &sql, &[]).await?;
+                done += 1;
+            }
+        }
+        Ok(done)
     }
-    let rows = conn
-        .query_all(statement(dialect, &sql, &params))
-        .await
-        .map_err(sql_err)?;
-    let rows: Vec<Row> = rows
-        .iter()
-        .map(|row| read(row, &kinds))
-        .collect::<Result<_, _>>()?;
-    Ok(rows
-        .first()
-        .and_then(|row| row.get(0).cloned())
-        .unwrap_or(Value::Null))
-}
 
-async fn referenced<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    table: &str,
-) -> Result<Vec<String>, StoreError> {
-    let rows = conn
-        .query_all(Statement::from_string(dialect.backend(), dialect.fks(table)))
-        .await
-        .map_err(sql_err)?;
-    let mut out = Vec::new();
-    for row in &rows {
-        let name = row
-            .try_get_by_index::<Option<String>>(dialect.fk_at())
-            .unwrap_or(None)
-            .unwrap_or_default();
-        if !name.is_empty() && !out.iter().any(|have| have == &name) {
-            out.push(name);
+    async fn mass<D: Dialect>(
+        &self,
+        dialect: &D,
+        schema: &Schema,
+        query: &Query,
+    ) -> Result<Value, StoreError> {
+        let (hint, kinds) = match &query.mass {
+            Some(Mass::Count) => ("COUNT(*)".to_string(), vec![ColumnKind::Integer]),
+            Some(Mass::Sum(name)) => {
+                let kind = schema.kind(*name)?;
+                (dialect.sum(kind, name.as_str()), vec![kind])
+            }
+            Some(Mass::Mean(name)) => {
+                let kind = schema.kind(*name)?;
+                (dialect.mean(kind, name.as_str()), vec![ColumnKind::Real])
+            }
+            Some(Mass::Low(name)) => (format!("MIN(\"{name}\")"), vec![schema.kind(*name)?]),
+            Some(Mass::High(name)) => (format!("MAX(\"{name}\")"), vec![schema.kind(*name)?]),
+            None => return Err(StoreError::Unsupported("mass needs mass()".into())),
+        };
+        let paths = self.paths(dialect, schema, query).await?;
+        let mut params = Vec::new();
+        let cond = dialect.tree(&paths, &query.tree, &mut params);
+        let mut sql = format!("SELECT {hint} FROM \"{}\"", schema.table);
+        if !cond.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&cond);
+        }
+        let rows = self.fetch(dialect, &sql, &params, &kinds).await?;
+        Ok(rows.first().and_then(|row| row.get(0).cloned()).unwrap_or(Value::Null))
+    }
+
+    async fn refs<D: Dialect>(
+        &self,
+        dialect: &D,
+        table: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let sql = dialect.fks(table);
+        let rows = self
+            .conn
+            .query_all(Statement::from_string(dialect.backend(), sql))
+            .await
+            .map_err(StoreError::from)?;
+        let mut out = Vec::new();
+        for row in &rows {
+            if let Some(name) = dialect.foreign(row)
+                && !name.is_empty()
+                && !out.iter().any(|have| have == &name)
+            {
+                out.push(name);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn columns<D: Dialect>(
+        &self,
+        dialect: &D,
+        table: &str,
+    ) -> Result<Vec<Column>, StoreError> {
+        let sql = dialect.introspect(table);
+        let rows = self
+            .conn
+            .query_all(Statement::from_string(dialect.backend(), sql))
+            .await
+            .map_err(StoreError::from)?;
+        rows.iter()
+            .map(|row| {
+                let (name, kind) = dialect.shape(row).map_err(StoreError::from)?;
+                Ok(Column { name, kind })
+            })
+            .collect()
+    }
+
+    async fn last_id<D: Dialect>(&self, dialect: &D) -> Result<i64, StoreError> {
+        let Some(latest) = dialect.latest() else {
+            return Err(StoreError::Unsupported("no last id".into()));
+        };
+        let rows = self
+            .conn
+            .query_all(Statement::from_string(dialect.backend(), latest.to_string()))
+            .await
+            .map_err(StoreError::from)?;
+        match rows
+            .first()
+            .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
+        {
+            Some(id) => Ok(id),
+            None => Err(StoreError::Value("no last id".into())),
         }
     }
-    Ok(out)
-}
 
-async fn run_columns<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-    table: &str,
-) -> Result<Vec<Column>, StoreError> {
-    let rows = conn
-        .query_all(Statement::from_string(
-            dialect.backend(),
-            dialect.introspect(table),
-        ))
-        .await
-        .map_err(sql_err)?;
-    let mut out = Vec::new();
-    for row in &rows {
-        let name = match row.try_get_by_index::<Option<String>>(dialect.name_at()) {
-            Ok(name) => name.unwrap_or_default(),
-            Err(fail) => return Err(sql_err(fail)),
-        };
-        let sql = match row.try_get_by_index::<Option<String>>(dialect.type_at()) {
-            Ok(sql) => sql.unwrap_or_default(),
-            Err(fail) => return Err(sql_err(fail)),
-        };
-        out.push(Column {
-            name,
-            kind: dialect.reflect(&sql),
-        });
-    }
-    Ok(out)
-}
-
-async fn run_last_id<D: Dialect>(
-    conn: &impl ConnectionTrait,
-    dialect: &D,
-) -> Result<i64, StoreError> {
-    let sql = match dialect.latest() {
-        Some(sql) => sql,
-        None => return Err(StoreError::Unsupported("no last id".into())),
-    };
-    let rows = conn
-        .query_all(Statement::from_string(dialect.backend(), sql.to_string()))
-        .await
-        .map_err(sql_err)?;
-    match rows
-        .first()
-        .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
-    {
-        Some(id) => Ok(id),
-        None => Err(StoreError::Value("no last id".into())),
+    async fn insert<D: Dialect>(
+        &self,
+        dialect: &D,
+        table: &str,
+        columns: &[String],
+        values: &[Value],
+    ) -> Result<i64, StoreError> {
+        let cols = columns
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marks = (0..columns.len())
+            .map(|at| dialect.mark(at))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({marks}) RETURNING \"id\"");
+        let rows = self
+            .conn
+            .query_all(Self::statement(dialect, &sql, values))
+            .await
+            .map_err(StoreError::from)?;
+        match rows
+            .first()
+            .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
+        {
+            Some(id) => Ok(id),
+            None => Err(StoreError::Value("no last id".into())),
+        }
     }
 }
 
-async fn run_insert<D: Dialect>(
-    dialect: &D,
-    conn: &impl ConnectionTrait,
-    table: &str,
-    columns: &[String],
-    values: &[Value],
-) -> Result<i64, StoreError> {
-    let cols = columns
-        .iter()
-        .map(|name| format!("\"{name}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let marks = (0..columns.len())
-        .map(|i| dialect.mark(i))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({marks}) RETURNING \"id\"");
-    let rows = conn
-        .query_all(statement(dialect, &sql, values))
-        .await
-        .map_err(sql_err)?;
-    match rows
-        .first()
-        .and_then(|row| row.try_get_by_index::<Option<i64>>(0).ok().flatten())
-    {
-        Some(id) => Ok(id),
-        None => Err(StoreError::Value("no last id".into())),
-    }
-}
-
+/// A grounded store: dialect and connection owned together.
 pub(crate) struct Engine<D, C> {
     dialect: D,
-    conn: C,
+    runner: Runner<C>,
 }
 
 impl<D, C> Engine<D, C> {
     pub(crate) fn new(dialect: D, conn: C) -> Self {
-        Engine { dialect, conn }
+        Engine {
+            dialect,
+            runner: Runner::new(conn),
+        }
     }
 }
 
-impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> Store
-    for Engine<D, C>
-{
+impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> Store for Engine<D, C> {
     fn execute<'a>(
         &'a self,
         sql: &'a str,
@@ -910,7 +769,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<usize, StoreError>> {
         let sql = sql.to_string();
         let params = params.to_vec();
-        Box::pin(async move { run_execute(&self.conn, &self.dialect, &sql, &params).await })
+        Box::pin(async move { self.runner.execute(&self.dialect, &sql, &params).await })
     }
 
     fn fetch<'a>(
@@ -922,7 +781,14 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let sql = sql.to_string();
         let params = params.to_vec();
         let kinds = kinds.to_vec();
-        Box::pin(async move { run_fetch(&self.conn, &self.dialect, &sql, &params, &kinds).await })
+        Box::pin(async move {
+            self.runner.fetch(&self.dialect, &sql, &params, &kinds).await
+        })
+    }
+
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
+        let table = table.to_string();
+        Box::pin(async move { self.runner.columns(&self.dialect, &table).await })
     }
 
     fn scan_query<'a>(
@@ -932,7 +798,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<Rows, StoreError>> {
         let schema = schema.clone();
         let query = query.clone();
-        Box::pin(async move { run_scan(&self.conn, &self.dialect, &schema, &query).await })
+        Box::pin(async move { self.runner.scan(&self.dialect, &schema, &query).await })
     }
 
     fn total_query<'a>(
@@ -942,12 +808,12 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<usize, StoreError>> {
         let schema = schema.clone();
         let query = query.clone();
-        Box::pin(async move { run_total(&self.conn, &self.dialect, &schema, &query).await })
+        Box::pin(async move { self.runner.total(&self.dialect, &schema, &query).await })
     }
 
     fn define<'a>(&'a self, schema: &'a Schema) -> BoxFuture<'a, Result<(), StoreError>> {
         let schema = schema.clone();
-        Box::pin(async move { run_define(&self.conn, &self.dialect, &schema).await })
+        Box::pin(async move { self.runner.define(&self.dialect, &schema).await })
     }
 
     fn create<'a>(
@@ -957,17 +823,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<Vec<Key>, StoreError>> {
         let schema = schema.clone();
         let batch = batch.to_vec();
-        Box::pin(async move { run_create(&self.conn, &self.dialect, &schema, &batch).await })
-    }
-
-    fn upsert<'a>(
-        &'a self,
-        schema: &'a Schema,
-        batch: &'a [Vec<(Name, Value)>],
-    ) -> BoxFuture<'a, Result<usize, StoreError>> {
-        let schema = schema.clone();
-        let batch = batch.to_vec();
-        Box::pin(async move { run_upsert(&self.conn, &self.dialect, &schema, &batch).await })
+        Box::pin(async move { self.runner.create(&self.dialect, &schema, &batch).await })
     }
 
     fn replace<'a>(
@@ -979,7 +835,19 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let schema = schema.clone();
         let key = key.value();
         let cells = cells.to_vec();
-        Box::pin(async move { run_replace(&self.conn, &self.dialect, &schema, &key, &cells).await })
+        Box::pin(async move {
+            self.runner.replace(&self.dialect, &schema, &key, &cells).await
+        })
+    }
+
+    fn upsert<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        let batch = batch.to_vec();
+        Box::pin(async move { self.runner.upsert(&self.dialect, &schema, &batch).await })
     }
 
     fn remove<'a>(
@@ -989,16 +857,16 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<(), StoreError>> {
         let schema = schema.clone();
         let key = key.value();
-        Box::pin(async move { run_remove(&self.conn, &self.dialect, &schema, &key).await })
+        Box::pin(async move { self.runner.remove(&self.dialect, &schema, &key).await })
     }
 
     fn evolve<'a>(
         &'a self,
         schema: &'a Schema,
-        trim: bool,
+        drop: bool,
     ) -> BoxFuture<'a, Result<usize, StoreError>> {
         let schema = schema.clone();
-        Box::pin(async move { run_evolve(&self.conn, &self.dialect, &schema, trim).await })
+        Box::pin(async move { self.runner.evolve(&self.dialect, &schema, drop).await })
     }
 
     fn mass<'a>(
@@ -1008,16 +876,11 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
     ) -> BoxFuture<'a, Result<Value, StoreError>> {
         let schema = schema.clone();
         let query = query.clone();
-        Box::pin(async move { run_mass(&self.conn, &self.dialect, &schema, &query).await })
-    }
-
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
-        let table = table.to_string();
-        Box::pin(async move { run_columns(&self.conn, &self.dialect, &table).await })
+        Box::pin(async move { self.runner.mass(&self.dialect, &schema, &query).await })
     }
 
     fn last_id<'a>(&'a self, _table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>> {
-        Box::pin(async move { run_last_id(&self.conn, &self.dialect).await })
+        Box::pin(async move { self.runner.last_id(&self.dialect).await })
     }
 
     fn insert<'a>(
@@ -1029,25 +892,28 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let table = table.to_string();
         let columns = columns.to_vec();
         let values = values.to_vec();
-        Box::pin(
-            async move { run_insert(&self.dialect, &self.conn, &table, &columns, &values).await },
-        )
+        Box::pin(async move {
+            self.runner
+                .insert(&self.dialect, &table, &columns, &values)
+                .await
+        })
     }
 
     fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
         Box::pin(async move {
-            let txn = self.conn.begin().await.map_err(sql_err)?;
+            let txn = self.runner.conn.begin().await.map_err(StoreError::from)?;
             Ok(Arc::new(Trade {
                 dialect: self.dialect.clone(),
-                txn: Mutex::new(Some(txn)),
+                txn: Mutex::new(Some(Runner::new(txn))),
             }) as Arc<dyn Store>)
         })
     }
 }
 
+/// A transaction wrapped as a standalone store.
 pub(crate) struct Trade<D> {
     dialect: D,
-    txn: Mutex<Option<DatabaseTransaction>>,
+    txn: Mutex<Option<Runner<DatabaseTransaction>>>,
 }
 
 impl<D: Dialect> Store for Trade<D> {
@@ -1060,10 +926,10 @@ impl<D: Dialect> Store for Trade<D> {
         let params = params.to_vec();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_execute(txn, &self.dialect, &sql, &params).await
+            runner.execute(&self.dialect, &sql, &params).await
         })
     }
 
@@ -1078,10 +944,21 @@ impl<D: Dialect> Store for Trade<D> {
         let kinds = kinds.to_vec();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_fetch(txn, &self.dialect, &sql, &params, &kinds).await
+            runner.fetch(&self.dialect, &sql, &params, &kinds).await
+        })
+    }
+
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
+        let table = table.to_string();
+        Box::pin(async move {
+            let guard = self.txn.lock().await;
+            let runner = guard
+                .as_ref()
+                .ok_or_else(|| StoreError::Value("settled deal".into()))?;
+            runner.columns(&self.dialect, &table).await
         })
     }
 
@@ -1094,10 +971,10 @@ impl<D: Dialect> Store for Trade<D> {
         let query = query.clone();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_scan(txn, &self.dialect, &schema, &query).await
+            runner.scan(&self.dialect, &schema, &query).await
         })
     }
 
@@ -1110,10 +987,10 @@ impl<D: Dialect> Store for Trade<D> {
         let query = query.clone();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_total(txn, &self.dialect, &schema, &query).await
+            runner.total(&self.dialect, &schema, &query).await
         })
     }
 
@@ -1121,10 +998,10 @@ impl<D: Dialect> Store for Trade<D> {
         let schema = schema.clone();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_define(txn, &self.dialect, &schema).await
+            runner.define(&self.dialect, &schema).await
         })
     }
 
@@ -1137,26 +1014,10 @@ impl<D: Dialect> Store for Trade<D> {
         let batch = batch.to_vec();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_create(txn, &self.dialect, &schema, &batch).await
-        })
-    }
-
-    fn upsert<'a>(
-        &'a self,
-        schema: &'a Schema,
-        batch: &'a [Vec<(Name, Value)>],
-    ) -> BoxFuture<'a, Result<usize, StoreError>> {
-        let schema = schema.clone();
-        let batch = batch.to_vec();
-        Box::pin(async move {
-            let guard = self.txn.lock().await;
-            let txn = guard
-                .as_ref()
-                .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_upsert(txn, &self.dialect, &schema, &batch).await
+            runner.create(&self.dialect, &schema, &batch).await
         })
     }
 
@@ -1171,10 +1032,26 @@ impl<D: Dialect> Store for Trade<D> {
         let cells = cells.to_vec();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_replace(txn, &self.dialect, &schema, &key, &cells).await
+            runner.replace(&self.dialect, &schema, &key, &cells).await
+        })
+    }
+
+    fn upsert<'a>(
+        &'a self,
+        schema: &'a Schema,
+        batch: &'a [Vec<(Name, Value)>],
+    ) -> BoxFuture<'a, Result<usize, StoreError>> {
+        let schema = schema.clone();
+        let batch = batch.to_vec();
+        Box::pin(async move {
+            let guard = self.txn.lock().await;
+            let runner = guard
+                .as_ref()
+                .ok_or_else(|| StoreError::Value("settled deal".into()))?;
+            runner.upsert(&self.dialect, &schema, &batch).await
         })
     }
 
@@ -1187,25 +1064,25 @@ impl<D: Dialect> Store for Trade<D> {
         let key = key.value();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_remove(txn, &self.dialect, &schema, &key).await
+            runner.remove(&self.dialect, &schema, &key).await
         })
     }
 
     fn evolve<'a>(
         &'a self,
         schema: &'a Schema,
-        trim: bool,
+        drop: bool,
     ) -> BoxFuture<'a, Result<usize, StoreError>> {
         let schema = schema.clone();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_evolve(txn, &self.dialect, &schema, trim).await
+            runner.evolve(&self.dialect, &schema, drop).await
         })
     }
 
@@ -1218,31 +1095,20 @@ impl<D: Dialect> Store for Trade<D> {
         let query = query.clone();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_mass(txn, &self.dialect, &schema, &query).await
-        })
-    }
-
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
-        let table = table.to_string();
-        Box::pin(async move {
-            let guard = self.txn.lock().await;
-            let txn = guard
-                .as_ref()
-                .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_columns(txn, &self.dialect, &table).await
+            runner.mass(&self.dialect, &schema, &query).await
         })
     }
 
     fn last_id<'a>(&'a self, _table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>> {
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_last_id(txn, &self.dialect).await
+            runner.last_id(&self.dialect).await
         })
     }
 
@@ -1257,10 +1123,10 @@ impl<D: Dialect> Store for Trade<D> {
         let values = values.to_vec();
         Box::pin(async move {
             let guard = self.txn.lock().await;
-            let txn = guard
+            let runner = guard
                 .as_ref()
                 .ok_or_else(|| StoreError::Value("settled deal".into()))?;
-            run_insert(&self.dialect, txn, &table, &columns, &values).await
+            runner.insert(&self.dialect, &table, &columns, &values).await
         })
     }
 
@@ -1270,15 +1136,16 @@ impl<D: Dialect> Store for Trade<D> {
 
     fn settle(self: Arc<Self>, commit: bool) -> BoxFuture<'static, Result<(), StoreError>> {
         Box::pin(async move {
-            let mut guard = self.txn.lock().await;
-            let txn = match guard.take() {
-                Some(txn) => txn,
-                None => return Ok(()),
+            let runner = {
+                let mut guard = self.txn.lock().await;
+                guard
+                    .take()
+                    .ok_or_else(|| StoreError::Value("settled deal".into()))?
             };
             if commit {
-                txn.commit().await.map_err(sql_err)
+                runner.conn.commit().await.map_err(StoreError::from)
             } else {
-                txn.rollback().await.map_err(sql_err)
+                runner.conn.rollback().await.map_err(StoreError::from)
             }
         })
     }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{BoxFuture, Gather, Reader, Show, Storable, Store, StoreError, Value, Widget, Writer};
+use crate::{BoxFuture, Column, ColumnKind, Gather, Reader, Show, Storable, Store, StoreError, Value, Widget, Writer};
 
 /// A table name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -495,6 +495,103 @@ impl Schema {
             .find(|field| field.id || field.keyed)
             .map(|field| field.name)
             .unwrap_or(Name("id"))
+    }
+
+    /// Storage kinds of the physical columns, in field order.
+    pub fn kinds(&self) -> Vec<ColumnKind> {
+        let mut out = Vec::new();
+        for field in &self.fields {
+            if !field.many {
+                out.push(ColumnKind::of(field.dtype));
+            }
+        }
+        out
+    }
+
+    /// Storage kind of a physical column, or a [`StoreError`] for a virtual or missing one.
+    pub fn kind(&self, name: Name) -> Result<ColumnKind, StoreError> {
+        let field = self
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| StoreError::Value(format!("unknown column {name}")))?;
+        if field.many {
+            return Err(StoreError::Value(format!("virtual column {name}")));
+        }
+        Ok(ColumnKind::of(field.dtype))
+    }
+
+    /// `ORDER BY` clause for the given sorts, defaulting to the key.
+    pub fn order(&self, sorts: &[Sort]) -> String {
+        if sorts.is_empty() {
+            return format!("\"{}\"", self.key());
+        }
+        let mut out = Vec::new();
+        for sort in sorts {
+            let field = match sort.order {
+                Order::Asc => format!("\"{}\"", sort.field),
+                Order::Desc => format!("\"{}\" DESC", sort.field),
+            };
+            out.push(field);
+        }
+        out.join(", ")
+    }
+
+    /// Same-kind column pairs where a stored column was renamed to a schema field.
+    pub fn moved(&self, have: &[Column]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for kind in [ColumnKind::Integer, ColumnKind::Real, ColumnKind::Text] {
+            let gone = have
+                .iter()
+                .filter(|col| col.kind == kind && col.name != "id")
+                .filter(|col| !self.fields.iter().any(|field| field.name.as_str() == col.name))
+                .collect::<Vec<_>>();
+            let fresh = self
+                .fields
+                .iter()
+                .filter(|field| !field.id && !field.many && ColumnKind::of(field.dtype) == kind)
+                .filter(|field| !have.iter().any(|col| col.name == field.name.as_str()))
+                .collect::<Vec<_>>();
+            if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
+                out.push((old.name.clone(), new.name.as_str().to_string()));
+            }
+        }
+        out
+    }
+
+    /// `DROP COLUMN` statements for stored columns that are neither the key, a schema field,
+    /// a renamed old name, nor referenced by another table.
+    pub fn drop(&self, have: &[Column], refs: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for col in have {
+            if col.name == "id" || refs.contains(&col.name) {
+                continue;
+            }
+            let known = self.fields.iter().any(|field| field.name.as_str() == col.name);
+            let moved = self.moved(have);
+            let renamed = moved.iter().any(|(old, _)| old == &col.name);
+            if !known && !renamed {
+                out.push(format!(
+                    "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
+                    self.table, col.name
+                ));
+            }
+        }
+        out
+    }
+
+    /// `RENAME COLUMN` statements for moved columns that are not referenced by another table.
+    pub fn rename(&self, have: &[Column], refs: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (old, new) in self.moved(have) {
+            if !refs.contains(&old) {
+                out.push(format!(
+                    "ALTER TABLE \"{}\" RENAME COLUMN \"{old}\" TO \"{new}\"",
+                    self.table
+                ));
+            }
+        }
+        out
     }
 }
 

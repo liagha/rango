@@ -26,6 +26,7 @@ use std::{fmt, future::Future, hash::{Hash, Hasher}, pin::Pin, str::FromStr, syn
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 /// A single typed database value.
@@ -111,6 +112,19 @@ impl Value {
     pub fn decimal(v: Decimal) -> Self {
         Self::Decimal(v)
     }
+
+    /// This value as a SQL literal for `DEFAULT` columns.
+    pub fn literal(&self) -> String {
+        match self {
+            Self::Null => "NULL".into(),
+            Self::Int(v) => v.to_string(),
+            Self::Float(v) => v.to_string(),
+            Self::Str(v) => format!("'{v}'"),
+            Self::Bool(v) => if *v { "1".into() } else { "0".into() },
+            Self::DateTime(at) => at.timestamp().to_string(),
+            Self::Decimal(v) => format!("'{v}'"),
+        }
+    }
 }
 
 impl From<&String> for Value {
@@ -137,6 +151,17 @@ pub enum ColumnKind {
     Real,
     /// Text affinity ([`Value::Str`]).
     Text,
+}
+
+impl ColumnKind {
+    /// Affinity of a field's SQL type name.
+    pub fn of(dtype: &str) -> Self {
+        match dtype {
+            "INTEGER" => ColumnKind::Integer,
+            "REAL" => ColumnKind::Real,
+            _ => ColumnKind::Text,
+        }
+    }
 }
 
 /// A single column: name plus affinity kind.
@@ -263,6 +288,20 @@ impl fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+impl From<DbErr> for StoreError {
+    fn from(err: DbErr) -> Self {
+        let msg = err.to_string();
+        if msg.contains("(code: 787)")
+            || msg.contains("FOREIGN KEY constraint failed")
+            || msg.contains("23503")
+        {
+            Self::Reference(msg)
+        } else {
+            Self::Sql(msg)
+        }
+    }
+}
 
 /// UI hint for how a field is rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

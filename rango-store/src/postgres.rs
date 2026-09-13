@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use sea_orm::{Database, DbBackend};
+use sea_orm::{Database, DbBackend, DbErr, QueryResult};
 
-use crate::engine::{Dialect, Engine, sql_err};
+use crate::engine::{Dialect, Engine};
 use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
 /// PostgreSQL backend dialect.
@@ -59,27 +59,10 @@ impl Dialect for Postgres {
         )
     }
 
-    fn name_at(&self) -> usize {
-        0
-    }
-
-    fn fks(&self, table: &str) -> String {
-        format!(
-            "SELECT a.attname FROM pg_constraint c JOIN pg_attribute a ON a.attnum = ANY(c.confkey) AND a.attrelid = c.confrelid WHERE c.contype = 'f' AND c.confrelid = to_regclass('{table}')"
-        )
-    }
-
-    fn fk_at(&self) -> usize {
-        0
-    }
-
-    fn type_at(&self) -> usize {
-        1
-    }
-
-    fn reflect(&self, sql: &str) -> ColumnKind {
-        let sql = sql.to_uppercase();
-        if sql.contains("INT") || sql.contains("BOOL") {
+    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
+        let name = row.try_get_by_index::<String>(0)?;
+        let sql = row.try_get_by_index::<String>(1)?.to_uppercase();
+        let kind = if sql.contains("INT") || sql.contains("BOOL") {
             ColumnKind::Integer
         } else if sql.contains("CHAR") || sql.contains("TEXT") {
             ColumnKind::Text
@@ -87,7 +70,18 @@ impl Dialect for Postgres {
             ColumnKind::Real
         } else {
             ColumnKind::Text
-        }
+        };
+        Ok((name, kind))
+    }
+
+    fn foreign(&self, row: &QueryResult) -> Option<String> {
+        row.try_get_by_index::<String>(0).ok()
+    }
+
+    fn fks(&self, table: &str) -> String {
+        format!(
+            "SELECT a.attname FROM pg_constraint c JOIN pg_attribute a ON a.attnum = ANY(c.confkey) AND a.attrelid = c.confrelid WHERE c.contype = 'f' AND c.confrelid = to_regclass('{table}')"
+        )
     }
 
     fn latest(&self) -> Option<&'static str> {
@@ -108,7 +102,7 @@ impl Dialect for Postgres {
 
 /// Connects to a PostgreSQL database at `url` (e.g. `postgres://...`) as a [`Store`].
 pub async fn connect(url: &str) -> Result<Arc<dyn Store>, StoreError> {
-    let conn = Database::connect(url).await.map_err(sql_err)?;
+    let conn = Database::connect(url).await.map_err(StoreError::from)?;
     Ok(Arc::new(Engine::new(Postgres, conn)))
 }
 

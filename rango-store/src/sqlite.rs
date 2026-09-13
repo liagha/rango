@@ -1,8 +1,8 @@
 use std::{path::Path, sync::Arc};
 
-use sea_orm::{ConnectionTrait, Database, DbBackend};
+use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, QueryResult};
 
-use crate::engine::{Dialect, Engine, sql_err};
+use crate::engine::{Dialect, Engine};
 use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
 /// SQLite backend dialect.
@@ -57,33 +57,25 @@ impl Dialect for Sqlite {
         format!("PRAGMA table_info(\"{table}\")")
     }
 
-    fn name_at(&self) -> usize {
-        1
-    }
-
-    fn fks(&self, table: &str) -> String {
-        format!("SELECT f.\"to\" FROM sqlite_master s, pragma_foreign_key_list(s.\"name\") f WHERE s.type='table' AND f.\"table\"='{table}'")
-    }
-
-    fn fk_at(&self) -> usize {
-        0
-    }
-
-    fn type_at(&self) -> usize {
-        2
-    }
-
-    fn reflect(&self, sql: &str) -> ColumnKind {
-        let sql = sql.to_uppercase();
-        if sql.contains("INT") {
+    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
+        let name = row.try_get_by_index::<String>(1)?;
+        let sql = row.try_get_by_index::<String>(2)?.to_uppercase();
+        let kind = if sql.contains("INT") {
             ColumnKind::Integer
-        } else if sql.contains("CHAR") || sql.contains("CLOB") || sql.contains("TEXT") {
-            ColumnKind::Text
         } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
             ColumnKind::Real
         } else {
             ColumnKind::Text
-        }
+        };
+        Ok((name, kind))
+    }
+
+    fn foreign(&self, row: &QueryResult) -> Option<String> {
+        row.try_get_by_index::<String>(0).ok()
+    }
+
+    fn fks(&self, table: &str) -> String {
+        format!("SELECT f.\"to\" FROM sqlite_master s, pragma_foreign_key_list(s.\"name\") f WHERE s.type='table' AND f.\"table\"='{table}'")
     }
 
     fn latest(&self) -> Option<&'static str> {
@@ -102,24 +94,24 @@ impl Dialect for Sqlite {
 /// Opens a SQLite database at `path`, creating it when absent, as a [`Store`].
 pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
-    let conn = Database::connect(&url).await.map_err(sql_err)?;
+    let conn = Database::connect(&url).await.map_err(StoreError::from)?;
     conn.execute_unprepared("PRAGMA foreign_keys=ON")
         .await
-        .map_err(sql_err)?;
+        .map_err(StoreError::from)?;
     Ok(Arc::new(Engine::new(Sqlite, conn)))
 }
 
 /// Opens a SQLite database at `path` in WAL mode (busy timeout 5s) as a [`Store`].
 pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
-    let conn = Database::connect(&url).await.map_err(sql_err)?;
+    let conn = Database::connect(&url).await.map_err(StoreError::from)?;
     for pragma in [
         "PRAGMA journal_mode=WAL",
         "PRAGMA synchronous=NORMAL",
         "PRAGMA busy_timeout=5000",
         "PRAGMA foreign_keys=ON",
     ] {
-        conn.execute_unprepared(pragma).await.map_err(sql_err)?;
+        conn.execute_unprepared(pragma).await.map_err(StoreError::from)?;
     }
     Ok(Arc::new(Engine::new(Sqlite, conn)))
 }
@@ -127,7 +119,6 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{alter, ddl, drop, kinds, rename};
     use crate::{
         Action, Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table,
         Tree,
@@ -185,14 +176,14 @@ mod tests {
     #[test]
     fn renders() {
         assert_eq!(
-            ddl(&Sqlite, &posts()),
+            Sqlite.ddl(&posts()),
             "CREATE TABLE IF NOT EXISTS \"posts\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"title\" TEXT NOT NULL)"
         );
         assert_eq!(
-            ddl(&Sqlite, &keyed()),
+            Sqlite.ddl(&keyed()),
             "CREATE TABLE IF NOT EXISTS \"products\" (\"sku\" TEXT PRIMARY KEY, \"price\" TEXT NOT NULL)"
         );
-        assert_eq!(kinds(&posts()), vec![ColumnKind::Integer, ColumnKind::Text]);
+        assert_eq!(posts().kinds(), vec![ColumnKind::Integer, ColumnKind::Text]);
     }
 
     #[test]
@@ -202,9 +193,9 @@ mod tests {
             col("id", ColumnKind::Integer),
             col("title", ColumnKind::Text),
         ];
-        assert!(alter(&Sqlite, &schema, &have).is_empty());
+        assert!(Sqlite.alter(&schema, &have).is_empty());
         let missing = vec![col("id", ColumnKind::Integer)];
-        assert_eq!(alter(&Sqlite, &schema, &missing).len(), 1);
+        assert_eq!(Sqlite.alter(&schema, &missing).len(), 1);
     }
 
     #[test]
@@ -215,8 +206,8 @@ mod tests {
             col("title", ColumnKind::Text),
             col("junk", ColumnKind::Text),
         ];
-        assert_eq!(drop(&schema, &have, &[]).len(), 1);
-        assert!(drop(&schema, &have[..2], &[]).is_empty());
+        assert_eq!(schema.drop(&have, &[]).len(), 1);
+        assert!(schema.drop(&have[..2], &[]).is_empty());
     }
 
     #[test]
@@ -226,17 +217,17 @@ mod tests {
             col("id", ColumnKind::Integer),
             col("name", ColumnKind::Text),
         ];
-        assert_eq!(rename(&schema, &have, &[]).len(), 1);
-        assert!(alter(&Sqlite, &schema, &have).is_empty());
-        assert!(drop(&schema, &have, &[]).is_empty());
+        assert_eq!(schema.rename(&have, &[]).len(), 1);
+        assert!(Sqlite.alter(&schema, &have).is_empty());
+        assert!(schema.drop(&have, &[]).is_empty());
         let mixed = vec![
             col("id", ColumnKind::Integer),
             col("name", ColumnKind::Text),
             col("age", ColumnKind::Integer),
         ];
-        assert_eq!(rename(&schema, &mixed, &[]).len(), 1);
-        assert!(alter(&Sqlite, &schema, &mixed).is_empty());
-        assert_eq!(drop(&schema, &mixed, &[]).len(), 1);
+        assert_eq!(schema.rename(&mixed, &[]).len(), 1);
+        assert!(Sqlite.alter(&schema, &mixed).is_empty());
+        assert_eq!(schema.drop(&mixed, &[]).len(), 1);
     }
 
     #[tokio::test]
