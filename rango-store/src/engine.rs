@@ -231,15 +231,12 @@ pub(crate) fn literal(value: &Value) -> String {
 }
 
 pub(crate) fn column<D: Dialect>(dialect: &D, field: &Field) -> String {
-    let base = if field.id {
+    let mut base = if field.id {
         dialect.primary(true, field.dtype)
     } else if field.keyed {
         dialect.primary(false, field.dtype)
     } else {
         let mut base = dialect.sql(field.dtype).to_string();
-        if let Some((table, column)) = field.reference() {
-            base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\")"));
-        }
         if field.unique {
             base.push_str(" UNIQUE");
         }
@@ -251,6 +248,11 @@ pub(crate) fn column<D: Dialect>(dialect: &D, field: &Field) -> String {
         }
         base
     };
+    if let Some((table, column)) = field.reference() {
+        base.push_str(&format!(
+            " REFERENCES \"{table}\"(\"{column}\") ON DELETE CASCADE"
+        ));
+    }
     format!("\"{}\" {}", field.name, base)
 }
 

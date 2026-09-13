@@ -29,14 +29,28 @@ impl Dialect for Sqlite {
     fn create(
         &self,
         schema: &Schema,
-        _head: &[(Name, Value)],
+        head: &[(Name, Value)],
         columns: &str,
         groups: &str,
     ) -> String {
-        format!(
-            "INSERT OR REPLACE INTO \"{}\" ({columns}) VALUES {groups}",
-            schema.table
-        )
+        let key = schema.key();
+        let sets = head
+            .iter()
+            .filter(|pair| pair.0 != key)
+            .map(|pair| format!("\"{}\" = excluded.\"{}\"", pair.0, pair.0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if sets.is_empty() {
+            format!(
+                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO NOTHING",
+                schema.table
+            )
+        } else {
+            format!(
+                "INSERT INTO \"{}\" ({columns}) VALUES {groups} ON CONFLICT(\"{key}\") DO UPDATE SET {sets}",
+                schema.table
+            )
+        }
     }
 
     fn introspect(&self, table: &str) -> String {
@@ -81,6 +95,9 @@ impl Dialect for Sqlite {
 pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
     let conn = Database::connect(&url).await.map_err(sql_err)?;
+    conn.execute_unprepared("PRAGMA foreign_keys=ON")
+        .await
+        .map_err(sql_err)?;
     Ok(Arc::new(Engine::new(Sqlite, conn)))
 }
 
@@ -92,6 +109,7 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
         "PRAGMA journal_mode=WAL",
         "PRAGMA synchronous=NORMAL",
         "PRAGMA busy_timeout=5000",
+        "PRAGMA foreign_keys=ON",
     ] {
         conn.execute_unprepared(pragma).await.map_err(sql_err)?;
     }
@@ -787,5 +805,133 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    fn instruments() -> Schema {
+        Schema {
+            table: Table("instruments"),
+            fields: vec![Field::key::<String>("code"), Field::str("title")],
+            rules: Vec::new(),
+        }
+    }
+
+    fn quotes() -> Schema {
+        Schema {
+            table: Table("quotes"),
+            fields: vec![
+                Field::key::<String>("code").references("instruments.code"),
+                Field::cell::<i64>("price"),
+            ],
+            rules: Vec::new(),
+        }
+    }
+
+    fn contracts() -> Schema {
+        Schema {
+            table: Table("contracts"),
+            fields: vec![
+                Field::key::<String>("code"),
+                Field::str("underlying").references("instruments.code"),
+            ],
+            rules: Vec::new(),
+        }
+    }
+
+    fn instrument(title: &str) -> Vec<Vec<(Name, Value)>> {
+        vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("title"), Value::str(title)),
+        ]]
+    }
+
+    fn quote() -> Vec<Vec<(Name, Value)>> {
+        vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("price"), Value::int(9)),
+        ]]
+    }
+
+    #[tokio::test]
+    async fn references() {
+        let db = open_db("references").await;
+        let parent = instruments();
+        let child = quotes();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        db.create(&child, &quote()).await.unwrap();
+        assert_eq!(
+            db.total_query(&child, &ask(Tree::And(Vec::new())))
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn enforces() {
+        let db = open_db("enforces").await;
+        let parent = instruments();
+        let child = quotes();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        let orphan = vec![vec![
+            (Name("code"), Value::str("ghost")),
+            (Name("price"), Value::int(9)),
+        ]];
+        assert!(db.create(&child, &orphan).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cascades() {
+        let db = open_db("cascades").await;
+        let parent = instruments();
+        let child = quotes();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let two = vec![
+            vec![(Name("code"), Value::str("x")), (Name("price"), Value::int(1))],
+            vec![(Name("code"), Value::str("x")), (Name("price"), Value::int(2))],
+        ];
+        db.create(&child, &two).await.unwrap();
+        db.remove(&parent, &Key::of(&Value::str("x")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.total_query(&child, &ask(Tree::And(Vec::new())))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn recreates() {
+        let db = open_db("recreates").await;
+        let parent = instruments();
+        let contract = contracts();
+        db.define(&parent).await.unwrap();
+        db.define(&contract).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let link = vec![vec![
+            (Name("code"), Value::str("c1")),
+            (Name("underlying"), Value::str("x")),
+        ]];
+        db.create(&contract, &link).await.unwrap();
+        db.create(&parent, &instrument("redone")).await.unwrap();
+        assert_eq!(
+            db.total_query(&contract, &ask(Tree::And(Vec::new())))
+                .await
+                .unwrap(),
+            1
+        );
+        let parent_row = db
+            .scan_query(&parent, &ask(Tree::And(Vec::new())))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(parent_row.str(1).unwrap(), "redone");
     }
 }
