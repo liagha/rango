@@ -15,7 +15,7 @@ async fn index(
     repository: Repository<Message>,
     current: Current,
 ) -> Result<Response, Error> {
-    let messages = repository.all().await.map_err(Error::from)?;
+    let messages = repository.all().await?;
     render(Index {
         messages,
         user: current.0.map(|user| user.username).unwrap_or_default(),

@@ -1,10 +1,16 @@
 use std::process::ExitCode;
 
+use axum::http::HeaderMap;
+
 use helloworld::{Category, Message, Product};
 use rango::Rango;
 use rango::authentication::Current;
 use rango::chrono::Utc;
-use rango::prelude::*;
+use rango::form::{Errors, Form, Valid};
+use rango::model::Repository;
+use rango::urls::Routes;
+use rango::view::{Request, Response, View, html, redirect, render};
+use rango::{Error, cookie, get, token};
 
 #[rango::template(path = "index.html")]
 struct Index {
@@ -14,9 +20,12 @@ struct Index {
 }
 
 async fn index(repository: Repository<Message>, current: Current) -> Result<Response, Error> {
-    let messages = repository.all().await.map_err(Error::from)?;
+    let messages = repository.all().await?;
     render(Index {
-        name: "world".to_string(),
+        name: messages
+            .last()
+            .map(|message| message.name.clone())
+            .unwrap_or_default(),
         messages,
         user: current.0.map(|user| user.username).unwrap_or_default(),
     })
@@ -84,7 +93,7 @@ async fn contact_post(
             message: form.message,
             created: Utc::now(),
         };
-        repository.save(&mut message).await.map_err(Error::from)?;
+        repository.save(&mut message).await?;
         Ok(redirect("/thanks"))
     } else {
         render(ContactPage {
