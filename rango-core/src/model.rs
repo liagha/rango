@@ -86,181 +86,10 @@ pub trait Model: Clone + Send + Sync + 'static {
     }
 }
 
-/// Name of the model's key column.
-pub fn id_column<M: Model>() -> Name {
-    M::schema().key()
-}
-
-/// Key value parsed from a raw string using the model's schema.
-pub fn key<M: Model>(raw: &str) -> Value {
-    Key::parse(raw, &M::schema()).value()
-}
-
-/// Rows linked to this model through a many-to-many `via` field.
-pub async fn related<M: Model>(
-    store: &Arc<dyn Store>,
-    schemas: &[Schema],
-    model: &M,
-    field: Name,
-) -> Result<Vec<Row>, StoreError> {
-    Ok(related_many(store, schemas, std::slice::from_ref(model), field)
-        .await?
-        .remove(&model.id())
-        .unwrap_or_default())
-}
-
-/// Fetches the rows linked to every given model in one query per table.
-pub async fn related_many<M: Model>(
-    store: &Arc<dyn Store>,
-    schemas: &[Schema],
-    models: &[M],
-    field: Name,
-) -> Result<HashMap<Value, Vec<Row>>, StoreError> {
-    let bad = |msg: &str| StoreError::Value(msg.into());
-    let here = M::schema();
-    let many = here
-        .fields
-        .iter()
-        .find(|entry| entry.name == field)
-        .ok_or_else(|| bad("unknown field"))?;
-    if !many.many {
-        return Err(StoreError::Unsupported("single field needs filter".into()));
-    }
-    let (through_table, mine, theirs) = match &many.link {
-        Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
-        _ => return Err(bad("many field needs via")),
-    };
-    let through = schemas
-        .iter()
-        .find(|spec| spec.table == through_table)
-        .ok_or_else(|| bad("unknown through"))?;
-    let their = through
-        .fields
-        .iter()
-        .find(|entry| entry.name == theirs)
-        .ok_or_else(|| bad("unknown through column"))?;
-    let (target_table, target_col) = match &their.link {
-        Some(Link::To(table, name)) => (*table, *name),
-        _ => return Err(bad("through column needs references")),
-    };
-    let target = schemas
-        .iter()
-        .find(|spec| spec.table == target_table)
-        .ok_or_else(|| bad("unknown link"))?;
-    store.define(through).await?;
-    store.define(target).await?;
-    let ids = models
-        .iter()
-        .map(|model| model.id())
-        .collect::<Vec<_>>();
-    let mut picks: HashMap<Value, Vec<Value>> = HashMap::new();
-    if !ids.is_empty() {
-        let leaves = ids
-            .into_iter()
-            .map(|id| {
-                Tree::Leaf(Filter {
-                    field: mine,
-                    op: Op::Eq,
-                    value: id,
-                })
-            })
-            .collect();
-        let links = store
-            .scan_query(
-                through,
-                &Query {
-                    tree: Tree::Or(leaves),
-                    sort: Vec::new(),
-                    page: Page::all(),
-                    only: Only::Some(vec![mine, theirs]),
-                    mass: None,
-                },
-            )
-            .await?;
-        for row in &links {
-            let (Some(mine), Some(theirs)) = (row.get(0), row.get(1)) else {
-                continue;
-            };
-            if *theirs != Value::Null {
-                picks.entry(mine.clone()).or_default().push(theirs.clone());
-            }
-        }
-    }
-    let mut want = Vec::new();
-    for ids in picks.values() {
-        for id in ids {
-            if !want.contains(id) {
-                want.push(id.clone());
-            }
-        }
-    }
-    let mut found: HashMap<Value, Vec<Row>> = HashMap::new();
-    if !want.is_empty() {
-        let leaves = want
-            .into_iter()
-            .map(|id| {
-                Tree::Leaf(Filter {
-                    field: target_col,
-                    op: Op::Eq,
-                    value: id,
-                })
-            })
-            .collect();
-        let index = target
-            .fields
-            .iter()
-            .filter(|field| !field.many)
-            .position(|field| field.name == target_col)
-            .ok_or_else(|| bad("unknown column"))?;
-        let rows = store
-            .scan_query(
-                target,
-                &Query {
-                    tree: Tree::Or(leaves),
-                    sort: vec![Sort {
-                        field: target.key(),
-                        order: Order::Asc,
-                    }],
-                    page: Page::all(),
-                    only: Only::All,
-                    mass: None,
-                },
-            )
-            .await?;
-        for (mine, ids) in &picks {
-            let keep = rows
-                .iter()
-                .filter(|row| ids.iter().any(|id| row.get(index) == Some(id)))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !keep.is_empty() {
-                found.insert(mine.clone(), keep);
-            }
-        }
-    }
-    Ok(found)
-}
-
 /// Full CRUD access to one model over a store; usable as an axum extractor.
 pub struct Repository<M = ()> {
     store: Arc<dyn Store>,
     marker: PhantomData<M>,
-}
-
-fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
-    let mut values = model.row().into_iter();
-    M::fields()
-        .into_iter()
-        .filter(|field| !field.id && !field.many)
-        .map(|field| {
-            let value = values.next().unwrap_or(Value::Null);
-            let value = match value {
-                Value::Null => field.initial(),
-                other => other,
-            };
-            (field.name, value)
-        })
-        .collect()
 }
 
 impl<M: Model> Repository<M> {
@@ -270,6 +99,33 @@ impl<M: Model> Repository<M> {
             store,
             marker: PhantomData,
         }
+    }
+
+    /// Name of the model's key column.
+    pub fn id_column() -> Name {
+        M::schema().key()
+    }
+
+    /// Key value parsed from a raw string.
+    pub fn key(raw: &str) -> Value {
+        Key::parse(raw, &M::schema()).value()
+    }
+
+    /// Cell name-value pairs this model writes, applying field defaults.
+    fn pairs(model: &M) -> Vec<(Name, Value)> {
+        let mut values = model.row().into_iter();
+        M::fields()
+            .into_iter()
+            .filter(|field| !field.id && !field.many)
+            .map(|field| {
+                let value = values.next().unwrap_or(Value::Null);
+                let value = match value {
+                    Value::Null => field.initial(),
+                    other => other,
+                };
+                (field.name, value)
+            })
+            .collect()
     }
 
     async fn ensure(&self) -> Result<(), StoreError> {
@@ -287,7 +143,7 @@ impl<M: Model> Repository<M> {
             return Ok(());
         }
         self.ensure().await?;
-        let batch = models.iter().map(pairs).collect::<Vec<_>>();
+        let batch = models.iter().map(Self::pairs).collect::<Vec<_>>();
         let keys = self.store.create(&M::schema(), &batch).await?;
         for (model, key) in models.iter_mut().zip(keys) {
             let value = key.value();
@@ -397,7 +253,7 @@ impl<M: Model> Repository<M> {
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
         self.ensure().await?;
         self.store
-            .replace(&M::schema(), &Key::of(&model.id())?, &pairs(model))
+            .replace(&M::schema(), &Key::of(&model.id())?, &Self::pairs(model))
             .await
     }
 
@@ -426,6 +282,137 @@ impl<M: Model> Repository<M> {
             .map(|field| field.name)
             .ok_or_else(|| StoreError::Value("no child relation".into()))?;
         Repository::<C>::new(self.store.clone()).filter(name, id).await
+    }
+
+    /// Rows of another model linked to each given model through a `via` field.
+    pub async fn related(
+        &self,
+        schemas: &[Schema],
+        models: &[M],
+        field: Name,
+    ) -> Result<HashMap<Value, Vec<Row>>, StoreError> {
+        let missing = |msg: &str| StoreError::Value(msg.into());
+        let here = M::schema();
+        let many = here
+            .fields
+            .iter()
+            .find(|entry| entry.name == field)
+            .ok_or_else(|| missing("unknown field"))?;
+        if !many.many {
+            return Err(StoreError::Unsupported("single field needs filter".into()));
+        }
+        let (through_table, mine, theirs) = match &many.link {
+            Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
+            _ => return Err(missing("many field needs via")),
+        };
+        let through = schemas
+            .iter()
+            .find(|schema| schema.table == through_table)
+            .ok_or_else(|| missing("unknown through"))?;
+        let their = through
+            .fields
+            .iter()
+            .find(|entry| entry.name == theirs)
+            .ok_or_else(|| missing("unknown through column"))?;
+        let (target_table, target_col) = match &their.link {
+            Some(Link::To(table, name)) => (*table, *name),
+            _ => return Err(missing("through column needs references")),
+        };
+        let target = schemas
+            .iter()
+            .find(|schema| schema.table == target_table)
+            .ok_or_else(|| missing("unknown link"))?;
+        self.store.define(through).await?;
+        self.store.define(target).await?;
+        let ids = models.iter().map(|model| model.id()).collect::<Vec<_>>();
+        let mut links: HashMap<Value, Vec<Value>> = HashMap::new();
+        if !ids.is_empty() {
+            let leaves = ids
+                .into_iter()
+                .map(|id| {
+                    Tree::Leaf(Filter {
+                        field: mine,
+                        op: Op::Eq,
+                        value: id,
+                    })
+                })
+                .collect();
+            let rows = self
+                .store
+                .scan_query(
+                    through,
+                    &Query {
+                        tree: Tree::Or(leaves),
+                        sort: Vec::new(),
+                        page: Page::all(),
+                        only: Only::Some(vec![mine, theirs]),
+                        mass: None,
+                    },
+                )
+                .await?;
+            for row in &rows {
+                let (Some(mine), Some(theirs)) = (row.get(0), row.get(1)) else {
+                    continue;
+                };
+                if *theirs != Value::Null {
+                    links.entry(mine.clone()).or_default().push(theirs.clone());
+                }
+            }
+        }
+        let mut needed = Vec::new();
+        for ids in links.values() {
+            for id in ids {
+                if !needed.contains(id) {
+                    needed.push(id.clone());
+                }
+            }
+        }
+        let mut found: HashMap<Value, Vec<Row>> = HashMap::new();
+        if !needed.is_empty() {
+            let leaves = needed
+                .into_iter()
+                .map(|id| {
+                    Tree::Leaf(Filter {
+                        field: target_col,
+                        op: Op::Eq,
+                        value: id,
+                    })
+                })
+                .collect();
+            let index = target
+                .fields
+                .iter()
+                .filter(|field| !field.many)
+                .position(|field| field.name == target_col)
+                .ok_or_else(|| missing("unknown column"))?;
+            let rows = self
+                .store
+                .scan_query(
+                    target,
+                    &Query {
+                        tree: Tree::Or(leaves),
+                        sort: vec![Sort {
+                            field: target.key(),
+                            order: Order::Asc,
+                        }],
+                        page: Page::all(),
+                        only: Only::All,
+                        mass: None,
+                    },
+                )
+                .await?;
+            for (mine, ids) in &links {
+                let keep = rows
+                    .iter()
+                    .filter(|row| ids.iter().any(|id| row.get(index) == Some(id)))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !keep.is_empty() {
+                    found.insert(mine.clone(), keep);
+                }
+            }
+        }
+        Ok(found)
     }
 }
 
@@ -694,14 +681,15 @@ mod tests {
                 title: "two".into(),
             },
         ];
-        let out = related_many(
-            &store,
-            &[Post::schema(), Pin::schema(), tag_schema],
-            &posts,
-            Name("tags"),
-        )
-        .await
-        .unwrap();
+        let repo = Repository::<Post>::new(store);
+        let out = repo
+            .related(
+                &[Post::schema(), Pin::schema(), tag_schema],
+                &posts,
+                Name("tags"),
+            )
+            .await
+            .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out.get(&Value::int(1)).unwrap().len(), 2);
         assert!(out.contains_key(&Value::int(1)));

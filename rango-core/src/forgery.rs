@@ -26,8 +26,11 @@ pub struct Token(
     pub String,
 );
 
-fn generate() -> String {
-    uuid::Uuid::new_v4().to_string()
+impl Token {
+    /// Fresh random token value.
+    fn fresh() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
 }
 
 fn safe(method: &Method) -> bool {
@@ -65,7 +68,7 @@ pub fn token(req: &Request) -> String {
     if let Some(token) = req.extensions().get::<Token>() {
         return token.0.clone();
     }
-    cookie(req.headers()).unwrap_or_else(generate)
+    cookie(req.headers()).unwrap_or_else(Token::fresh)
 }
 
 /// Middleware that checks the token field on unsafe methods and issues a cookie.
@@ -86,7 +89,7 @@ pub async fn guard(req: Request, next: Next) -> Result<Response, Error> {
         }
     }
 
-    let token = existing.clone().unwrap_or_else(generate);
+    let token = existing.clone().unwrap_or_else(Token::fresh);
     parts.extensions.insert(Token(token.clone()));
     let mut response = next.run(Request::from_parts(parts, bytes.into())).await;
 

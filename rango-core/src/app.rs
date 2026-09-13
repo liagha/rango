@@ -76,7 +76,7 @@ impl App {
         }
         router = router
             .layer(TraceLayer::new_for_http())
-            .layer(catch_panic(self.settings.debug));
+            .layer(Self::catch_panic(self.settings.debug));
         #[cfg(feature = "forgery")]
         if self.settings.forgery {
             router = router.layer(DefaultBodyLimit::max(forgery::LIMIT));
@@ -101,21 +101,21 @@ impl App {
         }
         axum::serve(listener, self.build()).await
     }
-}
 
-fn catch_panic(
-    debug: bool,
-) -> CatchPanicLayer<impl FnMut(Box<dyn Any + Send + 'static>) -> Response + Clone> {
-    CatchPanicLayer::custom(move |panic: Box<dyn Any + Send + 'static>| {
-        let body = if debug {
-            panic
-                .downcast_ref::<&str>()
-                .map(|msg| msg.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "Internal Server Error".to_string())
-        } else {
-            "Internal Server Error".to_string()
-        };
-        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
-    })
+    fn catch_panic(
+        debug: bool,
+    ) -> CatchPanicLayer<impl FnMut(Box<dyn Any + Send + 'static>) -> Response + Clone> {
+        CatchPanicLayer::custom(move |panic: Box<dyn Any + Send + 'static>| {
+            let body = if debug {
+                panic
+                    .downcast_ref::<&str>()
+                    .map(|msg| msg.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "Internal Server Error".to_string())
+            } else {
+                "Internal Server Error".to_string()
+            };
+            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        })
+    }
 }

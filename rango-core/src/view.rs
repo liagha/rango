@@ -40,6 +40,11 @@ pub fn redirect(to: &str) -> Response {
 pub trait View: Clone + Send + Sync + 'static {
     /// Run this view against the request.
     fn call(self, req: Request) -> Result<Response, Error>;
+
+    /// Axum method router for this view.
+    fn handler(self) -> MethodRouter {
+        get(move |req: Request| async move { self.call(req).into_response() })
+    }
 }
 
 impl<F> View for F
@@ -49,9 +54,4 @@ where
     fn call(self, req: Request) -> Result<Response, Error> {
         self(req)
     }
-}
-
-/// Axum method router for a view closure.
-pub fn get_view<V: View>(view: V) -> MethodRouter {
-    get(move |req: Request| async move { view.call(req).into_response() })
 }

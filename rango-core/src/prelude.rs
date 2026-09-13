@@ -7,14 +7,14 @@ pub use crate::forgery::{Token, cookie, guard, named, token};
 pub use crate::form::{Errors, FieldError, Form, Valid};
 pub use crate::model::{
     Action, Choice, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Policy, Query,
-    Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
+    Repository, Rule, Run, Schema, Sort, Table, Tree,
 };
 pub use crate::settings::Settings;
 pub use crate::store::{
     Cells, Column, Reader, Row, Show, Storable, Store, StoreError, Value, Widget, Writer,
 };
 pub use crate::urls::Routes;
-pub use crate::view::{Json, Request, Response, View, get_view, html, json, redirect, render};
+pub use crate::view::{Json, Request, Response, View, html, json, redirect, render};
 pub use askama::Template;
 pub use axum::extract::{Extension, Path, State};
 pub use axum::http::{HeaderMap, Method, StatusCode, Uri};

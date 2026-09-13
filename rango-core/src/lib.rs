@@ -24,11 +24,11 @@ pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
 pub use model::{
     Action, Choice, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Policy, Query,
-    Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
+    Repository, Rule, Run, Schema, Sort, Table, Tree,
 };
 pub use settings::Settings;
 pub use urls::Routes;
-pub use view::{Json, Request, Response, View, get_view, html, json, redirect, render};
+pub use view::{Json, Request, Response, View, html, json, redirect, render};
 
 pub use askama;
 pub use chrono;

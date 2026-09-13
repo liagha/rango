@@ -111,7 +111,7 @@ async fn main() -> ExitCode {
         .routes(
             Routes::new()
                 .route("/", get(index))
-                .route("/about", get_view(About))
+                .route("/about", View::handler(About))
                 .route("/contact", get(contact).post(contact_post))
                 .route("/thanks", get(thanks))
                 .route("/admin", get(admin)),

@@ -101,6 +101,20 @@ mod tests {
         Sqlite::open(&path).await.unwrap()
     }
 
+    #[tokio::test]
+    async fn secret() {
+        let path = std::env::temp_dir()
+            .join(format!("rango-test-{}-secret.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let first = Sqlite::open(&path).await.unwrap();
+        let one = first.secret().await;
+        assert_eq!(one.len(), 64);
+        assert_eq!(first.secret().await, one);
+        let second = Sqlite::open(&path).await.unwrap();
+        assert_eq!(second.secret().await, one);
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn schema() -> Schema {
         Schema {
             table: Table("w"),

@@ -136,7 +136,7 @@ impl Rango {
 
     async fn boot(self, store: Arc<dyn Store>) -> ExitCode {
         hint(&store).await;
-        let secret = settings::key(store.as_ref()).await;
+        let secret = store.secret().await;
         let settings = Settings::new().base_dir(&self.dir).secret(&secret);
         let mut authentication = authentication::Authentication::new(&secret);
         if let Some(tune) = self.tune {

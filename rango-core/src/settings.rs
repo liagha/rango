@@ -1,64 +1,6 @@
-//! Runtime settings and the secret key.
+//! Runtime settings for a Rango app.
 
 use std::path::PathBuf;
-
-use crate::{Column, Store, Value};
-
-/// Persistent secret key for the store, generated on first use.
-pub async fn key(store: &dyn Store) -> String {
-    if store
-        .execute(
-            "CREATE TABLE IF NOT EXISTS setting (name TEXT PRIMARY KEY, value TEXT)",
-            &[],
-        )
-        .await
-        .is_err()
-    {
-        return ephemeral("no setting table");
-    }
-    if let Some(secret) = read(store).await {
-        return secret;
-    }
-    let secret = fresh();
-    let _ = store
-        .execute(
-            "INSERT OR IGNORE INTO setting (name, value) VALUES ('secret', ?)",
-            &[Value::str(secret.clone())],
-        )
-        .await;
-    match read(store).await {
-        Some(secret) => secret,
-        None => ephemeral("no secret row"),
-    }
-}
-
-async fn read(store: &dyn Store) -> Option<String> {
-    let rows = store
-        .fetch(
-            "SELECT value FROM setting WHERE name = 'secret'",
-            &[],
-            &[Column::Text],
-        )
-        .await
-        .ok()?;
-    match rows.first()?.get(0)? {
-        Value::Str(secret) if !secret.is_empty() => Some(secret.clone()),
-        _ => None,
-    }
-}
-
-fn fresh() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
-}
-
-fn ephemeral(why: &str) -> String {
-    tracing::warn!("ephemeral secret: {why}");
-    fresh()
-}
 
 /// Runtime settings for a Rango app.
 pub struct Settings {
@@ -124,22 +66,5 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(all(test, feature = "sqlite"))]
-mod tests {
-    use super::*;
-    use crate::store::Sqlite;
-
-    #[tokio::test]
-    async fn keeps() {
-        let path = std::env::temp_dir().join(format!("rango-secret-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Sqlite::open(&path).await.unwrap();
-        let first = key(store.as_ref()).await;
-        assert_eq!(first.len(), 64);
-        assert_eq!(key(store.as_ref()).await, first);
-        let _ = std::fs::remove_file(&path);
     }
 }

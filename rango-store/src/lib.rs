@@ -876,6 +876,62 @@ pub trait Store: Send + Sync + 'static {
         })
     }
 
+    /// Persistent signing secret, generated and stored on first call.
+    fn secret<'a>(&'a self) -> BoxFuture<'a, String> {
+        Box::pin(async move {
+            let settings = Schema {
+                table: Table("setting"),
+                fields: vec![Field::key::<String>("name"), Field::str("value")],
+                rules: Vec::new(),
+            };
+            let read = || async {
+                let rows = self
+                    .scan_query(
+                        &settings,
+                        &Query {
+                            tree: Tree::Leaf(Filter {
+                                field: Name("name"),
+                                op: Op::Eq,
+                                value: Value::str("secret"),
+                            }),
+                            sort: Vec::new(),
+                            page: Page::all(),
+                            only: Only::All,
+                            mass: None,
+                        },
+                    )
+                    .await
+                    .ok()?;
+                match rows.first()?.get(1)? {
+                    Value::Str(secret) if !secret.is_empty() => Some(secret.clone()),
+                    _ => None,
+                }
+            };
+            let fresh = || format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+            if self.define(&settings).await.is_err() {
+                tracing::warn!("ephemeral secret: no setting table");
+                return fresh();
+            }
+            if let Some(secret) = read().await {
+                return secret;
+            }
+            let next = fresh();
+            let _ = self
+                .create(
+                    &settings,
+                    &[vec![
+                        (Name("name"), Value::str("secret")),
+                        (Name("value"), Value::str(next.clone())),
+                    ]],
+                )
+                .await;
+            read().await.unwrap_or_else(|| {
+                tracing::warn!("ephemeral secret: no secret row");
+                fresh()
+            })
+        })
+    }
+
     /// Opens a transaction as an independent [`Store`].
     fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
         Box::pin(async { Err(StoreError::Unsupported("deal".into())) })

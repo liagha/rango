@@ -11,7 +11,7 @@ use rango_core::{
     forgery::{Token, cookie},
     model::{
         Action as Deed, Filter, Key, Model, Name, Only, Op, Order, Page, Query, Schema, Sort,
-        Table, Tree, key,
+        Table, Tree,
     },
     view::{self, render},
 };
@@ -360,7 +360,7 @@ pub(crate) async fn detail<M: Model>(
     Params(mut params): Params<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let model = repository
-        .get(&key::<M>(&id))
+        .get(&Repository::<M>::key(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let notice = if let Some(note) = params.remove("notice") {
@@ -418,7 +418,7 @@ pub(crate) async fn detail<M: Model>(
                         tree: Tree::Leaf(Filter {
                             field: field.name,
                             op: Op::Eq,
-                            value: key::<M>(&id),
+                            value: Repository::<M>::key(&id),
                         }),
                         sort: vec![Sort {
                             field: other.key(),
@@ -558,7 +558,7 @@ pub(crate) async fn show_edit<M: Model>(
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
     let model = repository
-        .get(&key::<M>(&id))
+        .get(&Repository::<M>::key(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let values = model.row();
@@ -600,7 +600,7 @@ pub(crate) async fn replace<M: Model>(
     Form(map): Form<HashMap<String, String>>,
 ) -> Result<Response, Error> {
     let saved = repository
-        .get(&key::<M>(&id))
+        .get(&Repository::<M>::key(&id))
         .await?
         .ok_or(Error::NotFound)?;
     let fields = M::fields();
@@ -650,7 +650,7 @@ pub(crate) async fn replace<M: Model>(
     }
     let model = M::read(&mut Cells::new(&values))?;
     repository.update(&model).await?;
-    log(&history, M::table(), &key::<M>(&id), Action::Edit, &current).await;
+    log(&history, M::table(), &Repository::<M>::key(&id), Action::Edit, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
 }
 
@@ -661,11 +661,11 @@ pub(crate) async fn remove<M: Model>(
     OriginalUri(uri): OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
-    repository.delete(&key::<M>(&id)).await?;
+    repository.delete(&Repository::<M>::key(&id)).await?;
     log(
         &history,
         M::table(),
-        &key::<M>(&id),
+        &Repository::<M>::key(&id),
         Action::Delete,
         &current,
     )
