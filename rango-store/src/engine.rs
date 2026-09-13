@@ -8,8 +8,8 @@ use sea_orm::{
 use tokio::sync::Mutex;
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Query, Row, Rows,
-    Rule, Schema, Store, StoreError, Tree, Value,
+    BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Policy, Query, Row,
+    Rows, Rule, Schema, Store, StoreError, Tree, Value,
 };
 
 /// SQL dialect: backend grammar, schema rendering, and row decoding.
@@ -47,11 +47,11 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
             text
         };
         if let Some((table, column)) = field.reference() {
-            let policy = match field.on_delete.name.as_str() {
-                "cascade" => " ON DELETE CASCADE",
-                "protect" => " ON DELETE RESTRICT",
-                "set_null" => " ON DELETE SET NULL",
-                _ => "",
+            let policy = match field.on_delete {
+                Policy::Cascade => " ON DELETE CASCADE",
+                Policy::Protect => " ON DELETE RESTRICT",
+                Policy::Set => " ON DELETE SET NULL",
+                Policy::Nothing => "",
             };
             base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\"){policy}"));
         }

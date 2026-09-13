@@ -120,7 +120,7 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
 mod tests {
     use super::*;
     use crate::{
-        Action, Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Rule, Sort,
+        Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Policy, Query, Rule, Sort,
         Table, Tree,
     };
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
@@ -963,7 +963,7 @@ mod tests {
                 Field::str("underlying")
                     .optional()
                     .references("instruments.code")
-                    .on_delete(Action::set_null()),
+                    .on_delete(Policy::Set),
             ],
             rules: Vec::new(),
         };
@@ -996,7 +996,7 @@ mod tests {
                 Field::key::<String>("code"),
                 Field::str("underlying")
                     .references("instruments.code")
-                    .on_delete(Action::protect()),
+                    .on_delete(Policy::Protect),
             ],
             rules: Vec::new(),
         };

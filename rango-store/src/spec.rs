@@ -286,12 +286,12 @@ pub struct Field {
     pub index: bool,
     /// Fixed (value, label) choices rendering as a select; empty means a plain input.
     pub choices: &'static [Choice],
-    /// Default value factory, if any.
+    /// Default value factory writing into a [`Writer`].
     pub default: Option<DefaultFn>,
     /// Reference to another table, if any.
     pub link: Option<Link>,
     /// Delete policy for the referenced row.
-    pub on_delete: Action,
+    pub on_delete: Policy,
     /// Widget for this field.
     pub widget: fn() -> Widget,
     /// Parses raw text into the field's value.
@@ -318,7 +318,7 @@ impl Field {
             choices: &[],
             default: None,
             link: None,
-            on_delete: Action::cascade(),
+            on_delete: Policy::Cascade,
             widget: widget_of::<T>,
             parse: parse_of::<T>,
             text: text_of::<T>,
@@ -368,10 +368,10 @@ impl Field {
             choices: &[],
             default: None,
             link: None,
-            on_delete: Action::cascade(),
-            widget: nop_widget,
-            parse: nop_parse,
-            text: nop_text,
+            on_delete: Policy::Cascade,
+            widget: || Widget::Text,
+            parse: |_raw, _w| Ok(()),
+            text: |_r| String::new(),
         }
     }
 
@@ -429,8 +429,8 @@ impl Field {
     }
 
     /// Sets the delete policy for a referenced row.
-    pub fn on_delete(mut self, action: Action) -> Self {
-        self.on_delete = action;
+    pub fn on_delete(mut self, policy: Policy) -> Self {
+        self.on_delete = policy;
         self
     }
 
@@ -475,18 +475,6 @@ fn text_of<T: Storable + Show>(r: &mut dyn Reader) -> String {
         Ok(value) => T::text(&value),
         Err(_) => String::new(),
     }
-}
-
-fn nop_widget() -> Widget {
-    Widget::Text
-}
-
-fn nop_parse(_raw: &str, _w: &mut dyn Writer) -> Result<(), StoreError> {
-    Ok(())
-}
-
-fn nop_text(_r: &mut dyn Reader) -> String {
-    String::new()
 }
 
 /// A table definition: name, fields, and rules.
@@ -638,44 +626,19 @@ impl Action {
             row: true,
         }
     }
+}
 
+/// How a foreign key behaves when the referenced row is deleted.
+#[derive(Clone, Copy, Debug)]
+pub enum Policy {
     /// Delete child rows along with the referenced parent.
-    pub fn cascade() -> Self {
-        policy("cascade", "Cascade")
-    }
-
+    Cascade,
     /// Refuse to delete a referenced parent.
-    pub fn protect() -> Self {
-        policy("protect", "Protect")
-    }
-
+    Protect,
     /// Null the reference when the parent is deleted.
-    pub fn set_null() -> Self {
-        policy("set_null", "Set null")
-    }
-
-    /// Leave a bare reference that rejects parent deletes.
-    pub fn nothing() -> Self {
-        policy("nothing", "Nothing")
-    }
-}
-
-fn policy(name: &'static str, title: &'static str) -> Action {
-    Action {
-        name: Name(name),
-        title,
-        run: idle,
-        logged: false,
-        row: false,
-    }
-}
-
-fn idle(
-    _store: Arc<dyn Store>,
-    _schema: Schema,
-    _keys: Vec<Key>,
-) -> BoxFuture<'static, Result<String, StoreError>> {
-    Box::pin(async { Ok(String::new()) })
+    Set,
+    /// Leave the reference; the database rejects parent deletes.
+    Nothing,
 }
 
 fn wipe(

@@ -151,8 +151,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             if let Some(ref_path) = ref_path {
                 def = quote! { #def.references(#ref_path) };
 if let Some(action) = on_delete {
-                    let call = action_fn(action);
-                    def = quote! { #def.on_delete(rango::Action::#call()) };
+                    let call = policy_fn(action);
+                    def = quote! { #def.on_delete(rango::Policy::#call()) };
                 }
             }
             def
@@ -176,8 +176,8 @@ if let Some(action) = on_delete {
             if let Some(ref_path) = ref_path {
                 def = quote! { #def.references(#ref_path) };
 if let Some(action) = on_delete {
-                    let call = action_fn(action);
-                    def = quote! { #def.on_delete(rango::Action::#call()) };
+                    let call = policy_fn(action);
+                    def = quote! { #def.on_delete(rango::Policy::#call()) };
                 }
             }
             if let Some(default_val) = default {
@@ -291,8 +291,15 @@ fn parse_model(input: &DeriveInput) -> syn::Result<(String, Vec<syn::Path>)> {
     Ok((table.unwrap_or(format!("{name}s")), deeds))
 }
 
-fn action_fn(name: &str) -> proc_macro2::Ident {
-    proc_macro2::Ident::new(name, proc_macro2::Span::call_site())
+fn policy_fn(name: &str) -> proc_macro2::Ident {
+    let variant = match name {
+        "cascade" => "Cascade",
+        "protect" => "Protect",
+        "set_null" => "Set",
+        "nothing" => "Nothing",
+        _ => panic!("unknown on_delete policy: {name}"),
+    };
+    proc_macro2::Ident::new(variant, proc_macro2::Span::call_site())
 }
 
 fn parse_references(attrs: &[syn::Attribute]) -> syn::Result<Option<(String, Option<String>)>> {
