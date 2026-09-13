@@ -81,7 +81,7 @@ struct Index {
 }
 
 async fn list(repository: Repository<Post>) -> Result<Response, Error> {
-    let posts = repository.all().await.map_err(Error::from)?;
+    let posts = repository.all().await?;
     render(Index { posts })
 }
 ```
@@ -94,7 +94,7 @@ use rango::prelude::*;
 
 #[rango::main]
 async fn main() -> ExitCode {
-    Rango::serve(env!("CARGO_MANIFEST_DIR"))
+    Rango::new(env!("CARGO_MANIFEST_DIR"))
         .model::<Post>()
         .routes(Routes::new().route("/", get(list)))
         .authentication(|a| a.signup(true))
@@ -130,7 +130,7 @@ struct Index {
 }
 
 async fn list(repository: Repository<Post>) -> Result<Response, Error> {
-    let posts = repository.all().await.map_err(Error::from)?;
+    let posts = repository.all().await?;
     render(Index { posts })
 }
 ```
@@ -172,7 +172,7 @@ async fn contact_post(
             message: form.message,
             created: Utc::now(),
         };
-        repository.save(&mut message).await.map_err(Error::from)?;
+        repository.save(&mut message).await?;
         Ok(redirect("/thanks"))
     } else {
         render(ContactPage { form, errors })
@@ -190,7 +190,7 @@ the store:
 use rango::prelude::*;
 
 async fn post_json(repository: Repository<Post>) -> Result<Response, Error> {
-    let Some(post) = repository.get(&Value::int(1)).await.map_err(Error::from)? else {
+    let Some(post) = repository.get(&Value::int(1)).await? else {
         return Ok(json(Value::Null));
     };
     Ok(json(post.row()))
@@ -261,7 +261,7 @@ list, edit, add, delete, and any custom actions.
 ## Database
 
 The default store is SQLite. The file lives at `{dir}/store/rango.sqlite`, where
-`dir` is the path passed to `Rango::serve()`.
+`dir` is the path passed to `Rango::new()`.
 
 Tables are created on demand by `Repository` and the admin panel. Use the CLI to
 create them up front or to alter an existing database:

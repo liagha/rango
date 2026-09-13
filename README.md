@@ -48,7 +48,7 @@ use rango::prelude::*;
 
 #[rango::main]
 async fn main() -> ExitCode {
-    Rango::serve(env!("CARGO_MANIFEST_DIR"))
+    Rango::new(env!("CARGO_MANIFEST_DIR"))
         .model::<Post>()
         .routes(Routes::new().route("/", get(list)))
         .authentication(|a| a.signup(true))
