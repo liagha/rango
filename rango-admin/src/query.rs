@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use rango_core::chrono::{NaiveDate, NaiveTime};
-use rango_core::model::{Field, Filter, Op, Tree, Type};
-use rango_core::store::Value;
+use rango_core::model::{Field, Filter, Op, Tree};
+use rango_core::store::{Value, Widget};
 
 pub(crate) const PAGE: usize = 25;
 
@@ -15,7 +15,7 @@ pub(crate) fn tree(
 ) -> Tree {
     let mut parts = Vec::new();
     for field in fields.iter() {
-        if field.kind == Type::Id {
+        if field.id {
             continue;
         }
         let raw = params
@@ -25,13 +25,13 @@ pub(crate) fn tree(
         if raw.is_empty() {
             continue;
         }
-        match field.kind.flat() {
-            Type::Str | Type::Key => parts.push(Tree::Leaf(Filter {
+        match field.load() {
+            Widget::Text => parts.push(Tree::Leaf(Filter {
                 field: field.name,
                 op: Op::Like,
                 value: Value::str(format!("%{}%", raw.to_lowercase())),
             })),
-            Type::Decimal => match raw.parse::<rango_core::decimal::Decimal>() {
+            Widget::Money => match raw.parse::<rango_core::decimal::Decimal>() {
                 Ok(number) => parts.push(Tree::Leaf(Filter {
                     field: field.name,
                     op: Op::Eq,
@@ -39,7 +39,7 @@ pub(crate) fn tree(
                 })),
                 Err(_) => return Tree::Or(Vec::new()),
             },
-            Type::Int => match raw.parse::<i64>() {
+            Widget::Int => match raw.parse::<i64>() {
                 Ok(number) => parts.push(Tree::Leaf(Filter {
                     field: field.name,
                     op: Op::Eq,
@@ -47,7 +47,7 @@ pub(crate) fn tree(
                 })),
                 Err(_) => return Tree::Or(Vec::new()),
             },
-            Type::Float => match raw.parse::<f64>() {
+            Widget::Flt => match raw.parse::<f64>() {
                 Ok(number) => parts.push(Tree::Leaf(Filter {
                     field: field.name,
                     op: Op::Eq,
@@ -55,12 +55,12 @@ pub(crate) fn tree(
                 })),
                 Err(_) => return Tree::Or(Vec::new()),
             },
-            Type::Bool => parts.push(Tree::Leaf(Filter {
+            Widget::Check => parts.push(Tree::Leaf(Filter {
                 field: field.name,
                 op: Op::Eq,
                 value: Value::bool(matches!(raw, "1" | "true" | "on" | "yes")),
             })),
-            Type::Moment => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+            Widget::Date => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
                 Ok(day) => parts.push(Tree::Leaf(Filter {
                     field: field.name,
                     op: Op::At,
@@ -68,7 +68,6 @@ pub(crate) fn tree(
                 })),
                 Err(_) => return Tree::Or(Vec::new()),
             },
-            _ => {}
         }
     }
     if !text.is_empty() {
@@ -134,8 +133,8 @@ mod tests {
     fn fields() -> Vec<Field> {
         vec![
             Field::id(),
-            Field::new("name", Type::Str),
-            Field::new("age", Type::Int),
+            Field::str("name"),
+            Field::cell::<i64>("age"),
         ]
     }
 

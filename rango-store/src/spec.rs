@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{BoxFuture, Store, Value};
+use crate::{BoxFuture, Gather, Reader, Show, Storable, Store, StoreError, Value, Widget, Writer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Table(pub &'static str);
@@ -29,41 +29,6 @@ impl std::fmt::Display for Table {
 impl std::fmt::Display for Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum Type {
-    Id,
-    Key,
-    Str,
-    Int,
-    Float,
-    Bool,
-    Moment,
-    Decimal,
-    Many,
-    Opt(Box<Type>),
-}
-
-pub fn many(kind: &Type) -> bool {
-    matches!(kind.flat(), Type::Many)
-}
-
-impl Type {
-    pub fn optional(self) -> Type {
-        Type::Opt(Box::new(self))
-    }
-
-    pub fn is_optional(&self) -> bool {
-        matches!(self, &Type::Opt(_))
-    }
-
-    pub fn flat(&self) -> &Type {
-        match self {
-            Type::Opt(inner) => inner.flat(),
-            kind => kind,
-        }
     }
 }
 
@@ -200,11 +165,11 @@ pub enum Key {
 }
 
 impl Key {
-    pub fn of(value: &Value) -> Result<Self, crate::StoreError> {
+    pub fn of(value: &Value) -> Result<Self, StoreError> {
         match value {
             Value::Int(id) => Ok(Key::Int(*id)),
             Value::Str(text) => Ok(Key::Text(text.clone())),
-            _ => Err(crate::StoreError::Value("bad key".into())),
+            _ => Err(StoreError::Value("bad key".into())),
         }
     }
 
@@ -212,7 +177,7 @@ impl Key {
         let keyed = schema
             .fields
             .iter()
-            .any(|field| matches!(field.kind.flat(), Type::Key) && field.name == schema.key());
+            .any(|field| field.keyed && !field.id && field.name == schema.key());
         if keyed {
             return Key::Text(raw.into());
         }
@@ -233,33 +198,88 @@ impl Key {
 #[derive(Clone)]
 pub struct Field {
     pub name: Name,
-    pub kind: Type,
+    pub dtype: &'static str,
+    pub id: bool,
+    pub keyed: bool,
+    pub many: bool,
+    pub optional: bool,
     pub unique: bool,
     pub index: bool,
     pub pick: Option<Pick>,
-    pub default: Option<Value>,
+    pub default: Option<Arc<dyn Fn(&mut dyn Writer) + Send + Sync + 'static>>,
     pub link: Option<Link>,
+    pub widget: fn() -> Widget,
+    pub parse: fn(&str, &mut dyn Writer) -> Result<(), StoreError>,
+    pub text: fn(&mut dyn Reader) -> String,
 }
 
 impl Field {
-    pub fn new(name: &'static str, kind: Type) -> Self {
+    pub fn cell<T: Storable + Show>(name: &'static str) -> Self {
         Self {
             name: Name(name),
-            kind,
+            dtype: T::dtype(),
+            id: false,
+            keyed: false,
+            many: false,
+            optional: false,
             unique: false,
             index: false,
             pick: None,
             default: None,
             link: None,
+            widget: widget_of::<T>,
+            parse: parse_of::<T>,
+            text: text_of::<T>,
         }
     }
 
     pub fn id() -> Self {
-        Self::new("id", Type::Id)
+        let field = Self::cell::<i64>("id");
+        Self {
+            id: true,
+            keyed: true,
+            ..field
+        }
     }
 
-    pub fn key(name: &'static str) -> Self {
-        Self::new(name, Type::Key)
+    pub fn key<T: Storable + Show>(name: &'static str) -> Self {
+        let field = Self::cell::<T>(name);
+        Self {
+            keyed: true,
+            ..field
+        }
+    }
+
+    pub fn str(name: &'static str) -> Self {
+        Self::cell::<String>(name)
+    }
+
+    pub fn check(name: &'static str) -> Self {
+        Self::cell::<bool>(name)
+    }
+
+    pub fn many(name: &'static str) -> Self {
+        Self {
+            name: Name(name),
+            dtype: "TEXT",
+            id: false,
+            keyed: false,
+            many: true,
+            optional: false,
+            unique: false,
+            index: false,
+            pick: None,
+            default: None,
+            link: None,
+            widget: nop_widget,
+            parse: nop_parse,
+            text: nop_text,
+        }
+    }
+
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
     }
 
     pub fn unique(mut self) -> Self {
@@ -272,8 +292,13 @@ impl Field {
         self
     }
 
-    pub fn default(mut self, default: Value) -> Self {
-        self.default = Some(default);
+    pub fn default_value(mut self, value: impl Storable) -> Self {
+        self.default = Some(Arc::new(move |w| value.put(w)));
+        self
+    }
+
+    pub fn default(mut self, make: impl Fn(&mut dyn Writer) + Send + Sync + 'static) -> Self {
+        self.default = Some(Arc::new(make));
         self
     }
 
@@ -297,6 +322,50 @@ impl Field {
             _ => None,
         }
     }
+
+    pub fn load(&self) -> Widget {
+        (self.widget)()
+    }
+
+    pub fn initial(&self) -> Value {
+        match &self.default {
+            Some(make) => {
+                let mut gather = Gather::new();
+                make(&mut gather);
+                gather.value()
+            }
+            None => Value::Null,
+        }
+    }
+}
+
+fn widget_of<T: Show>() -> Widget {
+    T::widget()
+}
+
+fn parse_of<T: Storable + Show>(raw: &str, w: &mut dyn Writer) -> Result<(), StoreError> {
+    let value = T::parse(raw)?;
+    T::put(&value, w);
+    Ok(())
+}
+
+fn text_of<T: Storable + Show>(r: &mut dyn Reader) -> String {
+    match T::take(r) {
+        Ok(value) => T::text(&value),
+        Err(_) => String::new(),
+    }
+}
+
+fn nop_widget() -> Widget {
+    Widget::Text
+}
+
+fn nop_parse(_raw: &str, _w: &mut dyn Writer) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn nop_text(_r: &mut dyn Reader) -> String {
+    String::new()
 }
 
 #[derive(Clone)]
@@ -310,7 +379,7 @@ impl Schema {
     pub fn key(&self) -> Name {
         self.fields
             .iter()
-            .find(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+            .find(|field| field.id || field.keyed)
             .map(|field| field.name)
             .unwrap_or(Name("id"))
     }
@@ -326,7 +395,7 @@ pub struct Action {
 }
 
 pub type Run =
-    fn(Arc<dyn Store>, Schema, Vec<Key>) -> BoxFuture<'static, Result<String, crate::StoreError>>;
+    fn(Arc<dyn Store>, Schema, Vec<Key>) -> BoxFuture<'static, Result<String, StoreError>>;
 
 impl Action {
     pub fn wipe() -> Self {
@@ -344,7 +413,7 @@ fn wipe(
     store: Arc<dyn Store>,
     schema: Schema,
     keys: Vec<Key>,
-) -> BoxFuture<'static, Result<String, crate::StoreError>> {
+) -> BoxFuture<'static, Result<String, StoreError>> {
     Box::pin(async move {
         for key in &keys {
             store.remove(&schema, key).await?;
@@ -360,11 +429,12 @@ fn wipe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
 
     fn schema() -> Schema {
         Schema {
             table: Table("posts"),
-            fields: vec![Field::id(), Field::new("title", Type::Str)],
+            fields: vec![Field::id(), Field::str("title")],
             rules: Vec::new(),
         }
     }
@@ -372,7 +442,7 @@ mod tests {
     fn keyed() -> Schema {
         Schema {
             table: Table("products"),
-            fields: vec![Field::key("sku"), Field::new("price", Type::Decimal)],
+            fields: vec![Field::key::<String>("sku"), Field::cell::<Decimal>("price")],
             rules: Vec::new(),
         }
     }

@@ -6,8 +6,7 @@ use rango::authentication::Current;
 use rango::chrono::Utc;
 use rango::prelude::*;
 
-#[derive(Template)]
-#[template(path = "index.html", askama = rango::askama)]
+#[rango::template(path = "index.html")]
 struct Index {
     name: String,
     messages: Vec<Message>,
@@ -38,8 +37,7 @@ async fn admin() -> Result<Response, Error> {
     Ok(redirect("/admin/"))
 }
 
-#[derive(Deserialize, Default)]
-#[serde(crate = "rango::serde")]
+#[rango::form]
 struct Contact {
     name: String,
     message: String,
@@ -58,8 +56,7 @@ impl Valid for Contact {
     }
 }
 
-#[derive(Template)]
-#[template(path = "contact.html", askama = rango::askama)]
+#[rango::template(path = "contact.html")]
 struct ContactPage {
     form: Contact,
     errors: Errors,
@@ -98,15 +95,14 @@ async fn contact_post(
     }
 }
 
-#[derive(Template)]
-#[template(path = "thanks.html", askama = rango::askama)]
+#[rango::template(path = "thanks.html")]
 struct Thanks;
 
 async fn thanks() -> Result<Response, Error> {
     render(Thanks)
 }
 
-#[tokio::main]
+#[rango::main]
 async fn main() -> ExitCode {
     Rango::serve(env!("CARGO_MANIFEST_DIR"))
         .model::<Message>()

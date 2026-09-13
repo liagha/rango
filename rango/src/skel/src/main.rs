@@ -5,8 +5,7 @@ use rango::Rango;
 use rango::authentication::Current;
 use rango::prelude::*;
 
-#[derive(Template)]
-#[template(path = "index.html", askama = rango::askama)]
+#[rango::template(path = "index.html")]
 struct Index {
     messages: Vec<Message>,
     user: String,
@@ -23,7 +22,7 @@ async fn index(
     })
 }
 
-#[tokio::main]
+#[rango::main]
 async fn main() -> ExitCode {
     Rango::serve(env!("CARGO_MANIFEST_DIR"))
         .model::<Message>()

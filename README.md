@@ -9,7 +9,7 @@ that runs on SQLite or PostgreSQL.
 - **Models** — derive `Model` on plain structs, query through a typed `Repository`
 - **Store** — SQLite (default) and PostgreSQL backends, with transactions
 - **Routes** — handlers with extractors for repository, forms, auth, and request data
-- **Templates** — askama with `#[template(path = "...", askama = rango::askama)]`
+- **Templates** — askama via `#[rango::template(path = "...")]`
 - **Authentication** — sessions, signup toggle, superuser admin
 - **Admin** — auto-generated panel with search, edit, and actions per model
 - **CLI** — `create project`, `create user`, `migrate` commands
@@ -30,7 +30,7 @@ Or depend on `rango` directly and build the app in code:
 use rango::Rango;
 use rango::prelude::*;
 
-#[tokio::main]
+#[rango::main]
 async fn main() -> ExitCode {
     Rango::serve(env!("CARGO_MANIFEST_DIR"))
         .model::<Post>()

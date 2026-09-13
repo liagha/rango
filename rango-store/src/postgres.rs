@@ -3,7 +3,7 @@ use std::sync::Arc;
 use sea_orm::{Database, DbBackend};
 
 use crate::engine::{Dialect, Engine, sql_err};
-use crate::{ColumnKind, Name, Schema, Store, StoreError, Type, Value};
+use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
 #[derive(Clone)]
 pub struct Postgres;
@@ -17,17 +17,11 @@ impl Dialect for Postgres {
         format!("${}", at + 1)
     }
 
-    fn sql(&self, kind: &Type) -> &'static str {
-        match kind {
-            Type::Id => "BIGSERIAL PRIMARY KEY",
-            Type::Key => "TEXT PRIMARY KEY",
-            Type::Str => "TEXT",
-            Type::Int | Type::Moment => "BIGINT",
-            Type::Float => "DOUBLE PRECISION",
-            Type::Bool => "BIGINT",
-            Type::Decimal => "TEXT",
-            Type::Many => unreachable!("virtual field has no column"),
-            Type::Opt(inner) => self.sql(inner),
+    fn sql(&self, dtype: &str) -> &'static str {
+        match dtype {
+            "INTEGER" => "BIGINT",
+            "REAL" => "DOUBLE PRECISION",
+            _ => "TEXT",
         }
     }
 
@@ -169,9 +163,9 @@ mod tests {
         let schema = Schema {
             table: Table("fw"),
             fields: vec![
-                Field::id(),
-                Field::new("name", Type::Str),
-                Field::new("age", Type::Int.optional()),
+Field::id(),
+        Field::str("name"),
+        Field::cell::<i64>("age").optional(),
             ],
             rules: Vec::new(),
         };
@@ -273,8 +267,8 @@ mod tests {
         let keyed = Schema {
             table: Table("fk"),
             fields: vec![
-                Field::key("sku"),
-                Field::new("price", Type::Decimal.optional()),
+Field::key::<String>("sku"),
+        Field::cell::<Decimal>("price").optional(),
             ],
             rules: Vec::new(),
         };

@@ -1,6 +1,71 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Expr, ExprLit, Fields, LitStr};
+use syn::{Data, DeriveInput, Expr, ExprLit, Fields, ItemFn, LitStr};
+
+fn with_serde(mut input: DeriveInput, default: bool) -> TokenStream {
+    let derives = if default {
+        quote!(rango::prelude::Deserialize, Default)
+    } else {
+        quote!(rango::prelude::Deserialize)
+    };
+    input
+        .attrs
+        .push(syn::parse_quote!(#[derive(#derives)]));
+    input
+        .attrs
+        .push(syn::parse_quote!(#[serde(crate = "rango::serde")]));
+    quote!(#input).into()
+}
+
+#[proc_macro_attribute]
+pub fn form(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as DeriveInput);
+    with_serde(input, true)
+}
+
+#[proc_macro_attribute]
+pub fn input(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as DeriveInput);
+    with_serde(input, false)
+}
+
+#[proc_macro_attribute]
+pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = syn::parse_macro_input!(item as ItemFn);
+    if func.sig.asyncness.is_none() {
+        return syn::Error::new_spanned(&func.sig, "expected `async fn main`")
+            .to_compile_error()
+            .into();
+    }
+    let output = &func.sig.output;
+    let body = &func.block;
+    let attrs = &func.attrs;
+    let vis = &func.vis;
+    quote! {
+        #(#attrs)*
+        #vis fn main() #output {
+            rango::tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime")
+                .block_on(async #body)
+        }
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn template(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr: proc_macro2::TokenStream = attr.into();
+    let mut input = syn::parse_macro_input!(item as DeriveInput);
+    input
+        .attrs
+        .push(syn::parse_quote!(#[derive(rango::prelude::Template)]));
+    input
+        .attrs
+        .push(syn::parse_quote!(#[template(#attr, askama = rango::askama)]));
+    quote!(#input).into()
+}
 
 #[proc_macro_derive(Model, attributes(model, key, references, via, default))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -24,11 +89,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
 
     let mut field_defs = Vec::new();
-    let mut row_exprs = Vec::new();
-    let mut from_fields = Vec::new();
-    let mut set_id_stmt = None;
-    let mut id_expr = None;
-    let mut pos = 0usize;
+    let mut write_parts = Vec::new();
+    let mut read_parts = Vec::new();
+    let mut key_ident = None;
 
     for field in fields.into_iter() {
         let ident = field.ident.as_ref().unwrap();
@@ -37,11 +100,12 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         let is_key = attrs.iter().any(|a| a.path().is_ident("key"));
         let references = parse_references(attrs)?;
+        let references = references.as_deref();
         let via = parse_via(attrs)?;
         let default = parse_default(attrs)?;
 
         let (field_type, is_optional) = unpack_option(ty);
-        let (field_type, is_many) = unpack_vec(field_type);
+        let (cell_type, is_many) = unpack_vec(field_type);
         if is_many && is_optional {
             return Err(syn::Error::new_spanned(
                 field,
@@ -51,18 +115,19 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         if is_many && is_key {
             return Err(syn::Error::new_spanned(field, "key needs a single value"));
         }
-        let type_path = type_string(field_type);
-
-        let kind = kind_of(&type_path);
         let name = ident.to_string();
-        let is_id = is_key && name == "id" && kind == Kind::Int && !is_many;
+        let is_id = is_key && name == "id" && !is_many;
 
         let field_def = if is_id {
             quote! { rango::Field::id() }
         } else if is_key {
-            quote! { rango::Field::key(#name) }
+            let mut def = quote! { rango::Field::key::<#cell_type>(#name) };
+            if let Some(ref_path) = references {
+                def = quote! { #def.references(#ref_path) };
+            }
+            def
         } else if is_many {
-            let mut def = quote! { rango::Field::new(#name, rango::Type::Many) };
+            let mut def = quote! { rango::Field::many(#name) };
             if let Some((through, mine, theirs)) = via {
                 def = quote! {
                     #def.link(rango::Link::Via(
@@ -74,16 +139,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
             def
         } else {
-            let mut def = match kind {
-                Kind::Str | Kind::Other => {
-                    quote! { rango::Field::new(#name, rango::Type::Str) }
-                }
-                Kind::Int => quote! { rango::Field::new(#name, rango::Type::Int) },
-                Kind::Float => quote! { rango::Field::new(#name, rango::Type::Float) },
-                Kind::Bool => quote! { rango::Field::new(#name, rango::Type::Bool) },
-                Kind::Date => quote! { rango::Field::new(#name, rango::Type::Moment) },
-                Kind::Decimal => quote! { rango::Field::new(#name, rango::Type::Decimal) },
-            };
+            let mut def = quote! { rango::Field::cell::<#cell_type>(#name) };
             if is_optional {
                 def = quote! { #def.optional() };
             }
@@ -91,190 +147,37 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 def = quote! { #def.references(#ref_path) };
             }
             if let Some(default_val) = default {
-                def = quote! { #def.default(#default_val) };
+                def = quote! { #def.default_value(#default_val) };
             }
             def
         };
 
+        field_defs.push(field_def);
+
         if is_many {
-            from_fields.push(quote! { #ident: Vec::new() });
+            read_parts.push(quote! { #ident: Vec::new() });
             continue;
         }
-        let field_idx = syn::Index::from(pos);
-        pos += 1;
-
-        let row_expr = match kind {
-            Kind::Str => {
-                if is_optional {
-                    quote! { rango::Value::from(&self.#ident) }
-                } else {
-                    quote! { rango::Value::str(&self.#ident) }
-                }
-            }
-            Kind::Other => {
-                if is_optional {
-                    quote! {
-                        match &self.#ident {
-                            Some(v) => rango::Value::str(v),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::str(&self.#ident) }
-                }
-            }
-            Kind::Int => {
-                if is_optional {
-                    quote! {
-                        match self.#ident {
-                            Some(v) => rango::Value::int(v as i64),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::int(self.#ident as i64) }
-                }
-            }
-            Kind::Float => {
-                if is_optional {
-                    quote! {
-                        match self.#ident {
-                            Some(v) => rango::Value::float(v as f64),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::float(self.#ident as f64) }
-                }
-            }
-            Kind::Bool => {
-                if is_optional {
-                    quote! {
-                        match self.#ident {
-                            Some(v) => rango::Value::bool(v),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::bool(self.#ident) }
-                }
-            }
-            Kind::Date => {
-                if is_optional {
-                    quote! {
-                        match self.#ident {
-                            Some(v) => rango::Value::datetime(v),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::datetime(self.#ident) }
-                }
-            }
-            Kind::Decimal => {
-                if is_optional {
-                    quote! {
-                        match self.#ident {
-                            Some(v) => rango::Value::decimal(v),
-                            None => rango::Value::Null,
-                        }
-                    }
-                } else {
-                    quote! { rango::Value::decimal(self.#ident) }
-                }
-            }
-        };
-
-        let from_expr = if is_key {
-            match kind {
-                Kind::Int => quote! { row.int(#field_idx)? as _ },
-                _ => quote! { row.str(#field_idx)? },
-            }
-        } else if is_optional {
-            match kind {
-                Kind::Str | Kind::Other => quote! { row.opt_str(#field_idx) },
-                Kind::Int => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Int(v)) => Some(*v as _),
-                            _ => None,
-                        }
-                    }
-                }
-                Kind::Float => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Float(v)) => Some(*v as _),
-                            _ => None,
-                        }
-                    }
-                }
-                Kind::Bool => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Bool(v)) => Some(*v),
-                            _ => None,
-                        }
-                    }
-                }
-                Kind::Date => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::DateTime(v)) => Some(*v),
-                            _ => None,
-                        }
-                    }
-                }
-                Kind::Decimal => {
-                    quote! {
-                        match row.values.get(#field_idx) {
-                            Some(rango::Value::Decimal(v)) => Some(*v),
-                            _ => None,
-                        }
-                    }
-                }
-            }
-        } else {
-            match kind {
-                Kind::Str | Kind::Other => quote! { row.str(#field_idx)? },
-                Kind::Int => quote! { row.int(#field_idx)? as _ },
-                Kind::Float => quote! { row.float(#field_idx)? as _ },
-                Kind::Bool => quote! { row.bool(#field_idx)? },
-                Kind::Date => quote! { row.datetime(#field_idx)? },
-                Kind::Decimal => quote! { row.decimal(#field_idx)? },
-            }
-        };
-
         if is_key {
-            match kind {
-                Kind::Int => {
-                    set_id_stmt = Some(quote! {
-                        if let rango::Value::Int(id) = id {
-                            self.#ident = id as _;
-                        }
-                    });
-                    id_expr = Some(quote! { rango::Value::int(self.#ident as i64) });
-                }
-                _ => {
-                    set_id_stmt = Some(quote! {
-                        if let rango::Value::Str(id) = id {
-                            self.#ident = id;
-                        }
-                    });
-                    id_expr = Some(quote! { rango::Value::str(&self.#ident) });
-                }
-            }
+            key_ident = Some(ident);
         }
-
-        field_defs.push(field_def);
         if !is_id {
-            row_exprs.push(row_expr);
+            write_parts.push(quote! { rango::Storable::put(&self.#ident, w); });
         }
-        from_fields.push(quote! { #ident: #from_expr });
+        read_parts.push(quote! { #ident: rango::Storable::take(r)? });
     }
 
-    let set_id = set_id_stmt.unwrap_or_else(|| quote! { let _ = id; });
-    let id = id_expr.unwrap_or_else(|| quote! { rango::Value::Null });
+    let write_id = match &key_ident {
+        Some(ident) => quote! { rango::Storable::put(&self.#ident, w); },
+        None => quote! { w.nothing(); },
+    };
+    let read_id = match &key_ident {
+        Some(ident) => quote! {
+            self.#ident = rango::Storable::take(r)?;
+            Ok(())
+        },
+        None => quote! { Ok(()) },
+    };
     let actions = if deeds.is_empty() {
         quote! {}
     } else {
@@ -295,20 +198,22 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 vec![#(#field_defs),*]
             }
 
-            fn row(&self) -> Vec<rango::Value> {
-                vec![#(#row_exprs),*]
+            fn write(&self, w: &mut dyn rango::Writer) {
+                #(#write_parts)*
             }
 
-            fn from_row(row: &rango::Row) -> Result<Self, rango::StoreError> {
-                Ok(Self { #(#from_fields),* })
+            fn read(r: &mut dyn rango::Reader) -> Result<Self, rango::StoreError> {
+                Ok(Self {
+                    #(#read_parts),*
+                })
             }
 
-            fn set_id(&mut self, id: rango::Value) {
-                #set_id
+            fn write_id(&self, w: &mut dyn rango::Writer) {
+                #write_id
             }
 
-            fn id(&self) -> rango::Value {
-                #id
+            fn read_id(&mut self, r: &mut dyn rango::Reader) -> Result<(), rango::StoreError> {
+                #read_id
             }
 
             #actions
@@ -398,9 +303,9 @@ fn parse_default(attrs: &[syn::Attribute]) -> syn::Result<Option<proc_macro2::To
         }) = expr
         {
             let val = s.value();
-            return Ok(Some(quote! { rango::Value::str(#val) }));
+            return Ok(Some(quote! { String::from(#val) }));
         }
-        return Ok(Some(quote! { rango::Value::from(#expr) }));
+        return Ok(Some(quote! { #expr }));
     }
     Ok(None)
 }
@@ -427,43 +332,4 @@ fn unpack_vec(ty: &syn::Type) -> (&syn::Type, bool) {
         return (inner, true);
     }
     (ty, false)
-}
-
-fn type_string(ty: &syn::Type) -> String {
-    if let syn::Type::Path(tp) = ty {
-        let segments: Vec<String> = tp
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
-        segments.join("::")
-    } else {
-        "String".into()
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Str,
-    Int,
-    Float,
-    Bool,
-    Date,
-    Decimal,
-    Other,
-}
-
-fn kind_of(name: &str) -> Kind {
-    match name {
-        "String" | "str" => Kind::Str,
-        "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "isize" | "usize" => {
-            Kind::Int
-        }
-        "f64" | "f32" => Kind::Float,
-        "bool" => Kind::Bool,
-        "DateTime" | "DateTime<Utc>" => Kind::Date,
-        "Decimal" => Kind::Decimal,
-        _ => Kind::Other,
-    }
 }

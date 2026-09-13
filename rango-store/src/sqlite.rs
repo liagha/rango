@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use sea_orm::{ConnectionTrait, Database, DbBackend};
 
 use crate::engine::{Dialect, Engine, sql_err};
-use crate::{ColumnKind, Name, Schema, Store, StoreError, Type, Value};
+use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
 #[derive(Clone)]
 pub struct Sqlite;
@@ -17,17 +17,11 @@ impl Dialect for Sqlite {
         "?".into()
     }
 
-    fn sql(&self, kind: &Type) -> &'static str {
-        match kind {
-            Type::Id => "INTEGER PRIMARY KEY AUTOINCREMENT",
-            Type::Key => "TEXT PRIMARY KEY",
-            Type::Str => "TEXT",
-            Type::Int | Type::Moment => "INTEGER",
-            Type::Float => "REAL",
-            Type::Bool => "INTEGER",
-            Type::Decimal => "TEXT",
-            Type::Many => unreachable!("virtual field has no column"),
-            Type::Opt(inner) => self.sql(inner),
+    fn sql(&self, dtype: &str) -> &'static str {
+        match dtype {
+            "REAL" => "REAL",
+            "INTEGER" => "INTEGER",
+            _ => "TEXT",
         }
     }
 
@@ -106,7 +100,8 @@ mod tests {
     use super::*;
     use crate::engine::{alter, ddl, drop, kinds, rename};
     use crate::{Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table, Tree};
-    use chrono::{NaiveDate, NaiveTime};
+    use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+    use rust_decimal::Decimal;
 
     async fn open_db(name: &str) -> Arc<dyn Store> {
         let path =
@@ -124,9 +119,9 @@ mod tests {
             table: Table("w"),
             fields: vec![
                 Field::id(),
-                Field::new("name", Type::Str),
-                Field::new("age", Type::Int.optional()),
-                Field::new("at", Type::Moment.optional()),
+                Field::str("name"),
+                Field::cell::<i64>("age").optional(),
+                Field::cell::<DateTime<Utc>>("at").optional(),
             ],
             rules: Vec::new(),
         }
@@ -142,7 +137,7 @@ mod tests {
     fn posts() -> Schema {
         Schema {
             table: Table("posts"),
-            fields: vec![Field::id(), Field::new("title", Type::Str)],
+            fields: vec![Field::id(), Field::str("title")],
             rules: Vec::new(),
         }
     }
@@ -150,7 +145,7 @@ mod tests {
     fn keyed() -> Schema {
         Schema {
             table: Table("products"),
-            fields: vec![Field::key("sku"), Field::new("price", Type::Decimal)],
+            fields: vec![Field::key::<String>("sku"), Field::cell::<Decimal>("price")],
             rules: Vec::new(),
         }
     }
@@ -217,7 +212,7 @@ mod tests {
         let db = open_db("upserts").await;
         let schema = Schema {
             table: Table("p"),
-            fields: vec![Field::key("code"), Field::new("name", Type::Str)],
+            fields: vec![Field::key::<String>("code"), Field::str("name")],
             rules: Vec::new(),
         };
         db.define(&schema).await.unwrap();
@@ -244,7 +239,7 @@ mod tests {
         let db = open_db("upsert_merge").await;
         let schema = Schema {
             table: Table("p2"),
-            fields: vec![Field::key("code"), Field::new("name", Type::Str)],
+            fields: vec![Field::key::<String>("code"), Field::str("name")],
             rules: Vec::new(),
         };
         db.define(&schema).await.unwrap();
@@ -413,7 +408,7 @@ mod tests {
         let db = open_db("writes").await;
         let schema = Schema {
             table: Table("p"),
-            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            fields: vec![Field::id(), Field::str("name")],
             rules: Vec::new(),
         };
         db.define(&schema).await.unwrap();
@@ -430,7 +425,7 @@ mod tests {
         assert_eq!(keys, vec![Key::Int(1), Key::Int(2)]);
         let keyed = Schema {
             table: Table("k"),
-            fields: vec![Field::key("sku"), Field::new("price", Type::Int)],
+            fields: vec![Field::key::<String>("sku"), Field::cell::<i64>("price")],
             rules: Vec::new(),
         };
         db.define(&keyed).await.unwrap();
@@ -468,7 +463,7 @@ mod tests {
         let db = open_db("evolves").await;
         let one = Schema {
             table: Table("e"),
-            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            fields: vec![Field::id(), Field::str("name")],
             rules: Vec::new(),
         };
         assert_eq!(db.evolve(&one, false).await.unwrap(), 1);
@@ -477,8 +472,8 @@ mod tests {
             table: Table("e"),
             fields: vec![
                 Field::id(),
-                Field::new("name", Type::Str),
-                Field::new("age", Type::Int.optional()),
+                Field::str("name"),
+                Field::cell::<i64>("age").optional(),
             ],
             rules: Vec::new(),
         };
@@ -510,8 +505,8 @@ mod tests {
             table: Table("g"),
             fields: vec![
                 Field::id(),
-                Field::new("name", Type::Str),
-                Field::new("age", Type::Int.optional()),
+                Field::str("name"),
+                Field::cell::<i64>("age").optional(),
             ],
             rules: Vec::new(),
         };
@@ -647,7 +642,7 @@ mod tests {
         let db = open_db("wipes").await;
         let schema = Schema {
             table: Table("w"),
-            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            fields: vec![Field::id(), Field::str("name")],
             rules: Vec::new(),
         };
         db.define(&schema).await.unwrap();
@@ -684,7 +679,7 @@ mod tests {
     fn deals() -> Schema {
         Schema {
             table: Table("deals"),
-            fields: vec![Field::id(), Field::new("name", Type::Str)],
+            fields: vec![Field::id(), Field::str("name")],
             rules: Vec::new(),
         }
     }

@@ -10,7 +10,10 @@ pub mod urls;
 pub mod view;
 
 pub use rango_store as store;
-pub use store::{Column, ColumnKind, Row, Store, StoreError, Value};
+pub use store::{
+    Column, ColumnKind, Cells, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
+    Value, Widget, Writer,
+};
 
 pub use app::App;
 pub use error::Error;
@@ -19,7 +22,7 @@ pub use forgery::{Token, cookie, guard, named, token};
 pub use form::{Errors, FieldError, Form, Valid};
 pub use model::{
     Action, Check, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Pick, Query,
-    Repository, Rule, Run, Schema, Sort, Table, Tree, Type, id_column, key, many, related,
+    Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
 };
 pub use settings::Settings;
 pub use urls::Routes;
@@ -34,4 +37,4 @@ pub use tokio;
 
 pub use askama::Template;
 pub use axum::routing::{get, post};
-pub use rango_macros::Model;
+pub use rango_macros::{Model, form, input, main, template};

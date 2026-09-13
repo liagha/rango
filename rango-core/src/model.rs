@@ -4,35 +4,35 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use crate::{
     error::Error,
-    store::{Row, Store, StoreError, Value},
+    store::{Cells, Gather, Reader, Row, Slots, Store, StoreError, Value, Widget, Writer},
 };
 
 pub use crate::store::{
     Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
-    Run, Schema, Sort, Table, Tree, Type, many,
+    Run, Schema, Sort, Table, Tree,
 };
 
 pub trait Model: Clone + Send + Sync + 'static {
     fn table() -> Table;
     fn fields() -> Vec<Field>;
-    fn row(&self) -> Vec<Value>;
-    fn from_row(row: &Row) -> Result<Self, StoreError>;
-    fn set_id(&mut self, id: Value);
-    fn id(&self) -> Value;
+    fn write(&self, w: &mut dyn Writer);
+    fn read(r: &mut dyn Reader) -> Result<Self, StoreError>;
+    fn write_id(&self, w: &mut dyn Writer);
+    fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError>;
 
     fn columns() -> Vec<Name> {
         Self::fields()
-            .iter()
-            .filter(|f| !matches!(f.kind.flat(), Type::Id | Type::Key) && !many(&f.kind))
-            .map(|f| f.name)
+            .into_iter()
+            .filter(|field| !field.id && !field.keyed && !field.many)
+            .map(|field| field.name)
             .collect()
     }
 
     fn search() -> Vec<Name> {
         Self::fields()
-            .iter()
-            .filter(|f| matches!(f.kind.flat(), Type::Str))
-            .map(|f| f.name)
+            .into_iter()
+            .filter(|field| field.load() == Widget::Text)
+            .map(|field| field.name)
             .collect()
     }
 
@@ -54,6 +54,18 @@ pub trait Model: Clone + Send + Sync + 'static {
 
     fn spec() -> Schema {
         Self::schema()
+    }
+
+    fn row(&self) -> Vec<Value> {
+        let mut slots = Slots::new();
+        self.write(&mut slots);
+        slots.values()
+    }
+
+    fn id(&self) -> Value {
+        let mut gather = Gather::new();
+        self.write_id(&mut gather);
+        gather.value()
     }
 }
 
@@ -78,7 +90,7 @@ pub async fn related<M: Model>(
         .iter()
         .find(|entry| entry.name == field)
         .ok_or_else(|| bad("unknown field"))?;
-    if !crate::store::many(&many.kind) {
+    if !many.many {
         return Err(StoreError::Unsupported("single field needs filter".into()));
     }
     let (through_table, mine, theirs) = match &many.link {
@@ -168,12 +180,12 @@ fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
     let mut values = model.row().into_iter();
     M::fields()
         .into_iter()
-        .filter(|field| field.kind != Type::Id && !many(&field.kind))
+        .filter(|field| !field.id && !field.many)
         .map(|field| {
             let value = values.next().unwrap_or(Value::Null);
-            let value = match field.default {
-                Some(ref default) if value == Value::Null => default.clone(),
-                _ => value,
+            let value = match value {
+                Value::Null => field.initial(),
+                other => other,
             };
             (field.name, value)
         })
@@ -204,7 +216,8 @@ impl<M: Model> Repository<M> {
         let batch = models.iter().map(pairs).collect::<Vec<_>>();
         let keys = self.store.create(&M::schema(), &batch).await?;
         for (model, key) in models.iter_mut().zip(keys) {
-            model.set_id(key.value());
+            let value = key.value();
+            model.read_id(&mut Cells::new(std::slice::from_ref(&value)))?;
         }
         Ok(())
     }
@@ -280,7 +293,7 @@ impl<M: Model> Repository<M> {
             return Err(StoreError::Unsupported("projected rows need rows()".into()));
         }
         let rows = self.rows(query).await?;
-        rows.iter().map(|row| M::from_row(row)).collect()
+        rows.iter().map(|row| M::read(&mut row.cells())).collect()
     }
 
     pub async fn rows(&self, query: &Query) -> Result<Vec<Row>, StoreError> {
@@ -327,6 +340,7 @@ impl<M: Model> FromRequestParts<()> for Repository<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Storable;
 
     #[derive(Clone)]
     struct Post {
@@ -340,28 +354,27 @@ mod tests {
         }
 
         fn fields() -> Vec<Field> {
-            vec![Field::id(), Field::new("title", Type::Str)]
+            vec![Field::id(), Field::str("title")]
         }
 
-        fn row(&self) -> Vec<Value> {
-            vec![Value::str(&self.title)]
+        fn write(&self, w: &mut dyn Writer) {
+            Storable::put(&self.title, w);
         }
 
-        fn from_row(row: &Row) -> Result<Self, StoreError> {
+        fn read(r: &mut dyn Reader) -> Result<Self, StoreError> {
             Ok(Self {
-                id: row.int(0)?,
-                title: row.str(1)?,
+                id: Storable::take(r)?,
+                title: Storable::take(r)?,
             })
         }
 
-        fn set_id(&mut self, id: Value) {
-            if let Value::Int(id) = id {
-                self.id = id;
-            }
+        fn write_id(&self, w: &mut dyn Writer) {
+            Storable::put(&self.id, w);
         }
 
-        fn id(&self) -> Value {
-            Value::int(self.id)
+        fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError> {
+            self.id = Storable::take(r)?;
+            Ok(())
         }
     }
 
@@ -377,28 +390,31 @@ mod tests {
         }
 
         fn fields() -> Vec<Field> {
-            vec![Field::key("sku"), Field::new("price", Type::Decimal)]
+            vec![
+                Field::key::<String>("sku"),
+                Field::cell::<rust_decimal::Decimal>("price"),
+            ]
         }
 
-        fn row(&self) -> Vec<Value> {
-            vec![Value::str(&self.sku), Value::decimal(self.price)]
+        fn write(&self, w: &mut dyn Writer) {
+            Storable::put(&self.sku, w);
+            Storable::put(&self.price, w);
         }
 
-        fn from_row(row: &Row) -> Result<Self, StoreError> {
+        fn read(r: &mut dyn Reader) -> Result<Self, StoreError> {
             Ok(Self {
-                sku: row.str(0)?,
-                price: row.decimal(1)?,
+                sku: Storable::take(r)?,
+                price: Storable::take(r)?,
             })
         }
 
-        fn set_id(&mut self, id: Value) {
-            if let Value::Str(id) = id {
-                self.sku = id;
-            }
+        fn write_id(&self, w: &mut dyn Writer) {
+            Storable::put(&self.sku, w);
         }
 
-        fn id(&self) -> Value {
-            Value::str(&self.sku)
+        fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError> {
+            self.sku = Storable::take(r)?;
+            Ok(())
         }
     }
 

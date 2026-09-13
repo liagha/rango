@@ -9,13 +9,20 @@ use tokio::sync::Mutex;
 
 use crate::{
     BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Order, Query, Row,
-    Rows, Schema, Sort, Store, StoreError, Tree, Type, Value, many,
+    Rows, Schema, Sort, Store, StoreError, Tree, Value,
 };
 
 pub(crate) trait Dialect: Clone + Send + Sync + 'static {
     fn backend(&self) -> DbBackend;
     fn mark(&self, at: usize) -> String;
-    fn sql(&self, kind: &Type) -> &'static str;
+    fn sql(&self, dtype: &str) -> &'static str;
+    fn primary(&self, auto: bool, dtype: &str) -> String {
+        match (self.backend(), auto) {
+            (DbBackend::Sqlite, true) => "INTEGER PRIMARY KEY AUTOINCREMENT".into(),
+            (DbBackend::Postgres, true) => "BIGSERIAL PRIMARY KEY".into(),
+            _ => format!("{} PRIMARY KEY", self.sql(dtype)),
+        }
+    }
     fn create(
         &self,
         schema: &Schema,
@@ -174,10 +181,10 @@ pub(crate) fn kind_of(schema: &Schema, name: Name) -> Result<ColumnKind, StoreEr
         .iter()
         .find(|field| field.name == name)
         .ok_or_else(|| StoreError::Value(format!("unknown column {name}")))?;
-    if many(&field.kind) {
+    if field.many {
         return Err(StoreError::Value(format!("virtual column {name}")));
     }
-    Ok(affinity(&field.kind))
+    Ok(affinity(field.dtype))
 }
 
 pub(crate) fn sorts(sorts: &[Sort], schema: &Schema) -> String {
@@ -198,13 +205,11 @@ pub(crate) fn statement<D: Dialect>(dialect: &D, sql: &str, params: &[Value]) ->
     Statement::from_sql_and_values(dialect.backend(), sql, bind(params))
 }
 
-pub(crate) fn affinity(kind: &Type) -> ColumnKind {
-    match kind {
-        Type::Id | Type::Int | Type::Moment | Type::Bool => ColumnKind::Integer,
-        Type::Float => ColumnKind::Real,
-        Type::Str | Type::Key | Type::Decimal => ColumnKind::Text,
-        Type::Many => unreachable!("virtual field has no column"),
-        Type::Opt(inner) => affinity(inner),
+pub(crate) fn affinity(dtype: &str) -> ColumnKind {
+    match dtype {
+        "INTEGER" => ColumnKind::Integer,
+        "REAL" => ColumnKind::Real,
+        _ => ColumnKind::Text,
     }
 }
 
@@ -227,21 +232,26 @@ pub(crate) fn literal(value: &Value) -> String {
 }
 
 pub(crate) fn column<D: Dialect>(dialect: &D, field: &Field) -> String {
-    let mut base = dialect.sql(&field.kind).to_string();
-    if !matches!(field.kind.flat(), Type::Id | Type::Key) {
+    let base = if field.id {
+        dialect.primary(true, field.dtype)
+    } else if field.keyed {
+        dialect.primary(false, field.dtype)
+    } else {
+        let mut base = dialect.sql(field.dtype).to_string();
         if let Some((table, column)) = field.reference() {
             base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\")"));
         }
         if field.unique {
             base.push_str(" UNIQUE");
         }
-        if !field.kind.is_optional() {
+        if !field.optional {
             base.push_str(" NOT NULL");
         }
-        if let Some(default) = &field.default {
-            base.push_str(&format!(" DEFAULT {}", literal(default)));
+        if field.default.is_some() {
+            base.push_str(&format!(" DEFAULT {}", literal(&field.initial())));
         }
-    }
+        base
+    };
     format!("\"{}\" {}", field.name, base)
 }
 
@@ -249,8 +259,8 @@ pub(crate) fn kinds(schema: &Schema) -> Vec<ColumnKind> {
     schema
         .fields
         .iter()
-        .filter(|field| !many(&field.kind))
-        .map(|field| affinity(&field.kind))
+        .filter(|field| !field.many)
+        .map(|field| affinity(field.dtype))
         .collect()
 }
 
@@ -258,7 +268,7 @@ pub(crate) fn ddl<D: Dialect>(dialect: &D, schema: &Schema) -> String {
     let columns: Vec<String> = schema
         .fields
         .iter()
-        .filter(|field| !many(&field.kind))
+        .filter(|field| !field.many)
         .map(|field| column(dialect, field))
         .collect();
     format!(
@@ -276,7 +286,7 @@ pub(crate) fn alter<D: Dialect>(
     let moved = moved(schema, have);
     let mut out = Vec::new();
     for field in &schema.fields {
-        if field.kind == Type::Id || many(&field.kind) {
+        if field.id || field.many {
             continue;
         }
         if !have.iter().any(|col| col.name == field.name.as_str())
@@ -345,9 +355,9 @@ pub(crate) fn moved(schema: &Schema, have: &[Column]) -> Vec<(String, String)> {
             .fields
             .iter()
             .filter(|field| {
-                field.kind != Type::Id
-                    && !many(&field.kind)
-                    && affinity(&field.kind) == kind
+                !field.id
+                    && !field.many
+                    && affinity(field.dtype) == kind
                     && !have.iter().any(|col| col.name == field.name.as_str())
             })
             .collect();
@@ -479,7 +489,7 @@ async fn run_create<D: Dialect>(
     let keyed = schema
         .fields
         .iter()
-        .any(|field| matches!(field.kind.flat(), Type::Key));
+        .any(|field| field.keyed && !field.id);
     if keyed {
         let head = &batch[0];
         let columns = head
@@ -564,7 +574,7 @@ async fn run_upsert<D: Dialect>(
     if !schema
         .fields
         .iter()
-        .any(|field| matches!(field.kind.flat(), Type::Key))
+        .any(|field| field.keyed && !field.id)
     {
         let created = run_create(conn, dialect, schema, batch).await?;
         return Ok(created.len());

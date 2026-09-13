@@ -5,4 +5,3 @@ edition.workspace = true
 
 [dependencies]
 rango.workspace = true
-tokio.workspace = true

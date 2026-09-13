@@ -7,12 +7,12 @@ mod engine;
 
 pub use spec::{
     Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
-    Run, Schema, Sort, Table, Tree, Type, many,
+    Run, Schema, Sort, Table, Tree,
 };
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, pin::Pin, str::FromStr, sync::Arc};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -162,6 +162,10 @@ impl Row {
             _ => Err(bad()),
         }
     }
+
+    pub fn cells(&self) -> Cells<'_> {
+        Cells::new(&self.values)
+    }
 }
 
 pub type Rows = Vec<Row>;
@@ -188,6 +192,479 @@ impl fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Widget {
+    Text,
+    Int,
+    Flt,
+    Money,
+    Date,
+    Check,
+}
+
+pub trait Writer {
+    fn nothing(&mut self);
+    fn int(&mut self, value: i64);
+    fn flt(&mut self, value: f64);
+    fn str(&mut self, value: &str);
+}
+
+pub trait Reader {
+    fn nothing(&mut self) -> bool;
+    fn int(&mut self) -> Result<i64, StoreError>;
+    fn flt(&mut self) -> Result<f64, StoreError>;
+    fn str(&mut self) -> Result<String, StoreError>;
+}
+
+pub trait Storable: Send + Sync + 'static {
+    fn put(&self, w: &mut dyn Writer);
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError>
+    where
+        Self: Sized;
+    fn dtype() -> &'static str;
+}
+
+pub trait Show: Sized {
+    fn widget() -> Widget;
+    fn parse(raw: &str) -> Result<Self, StoreError>;
+    fn text(&self) -> String;
+}
+
+macro_rules! cells {
+    ($($cell:ty),*) => {$(
+        impl Storable for $cell {
+            fn put(&self, w: &mut dyn Writer) {
+                w.int(*self as i64);
+            }
+
+            fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+                Ok(r.int()? as $cell)
+            }
+
+            fn dtype() -> &'static str {
+                "INTEGER"
+            }
+        }
+
+        impl Show for $cell {
+            fn widget() -> Widget {
+                Widget::Int
+            }
+
+            fn parse(raw: &str) -> Result<Self, StoreError> {
+                raw.parse::<$cell>()
+                    .map_err(|_| StoreError::Value(format!("bad int {raw}")))
+            }
+
+            fn text(&self) -> String {
+                self.to_string()
+            }
+        }
+    )*};
+}
+
+cells!(i64, i32, i16, i8, u64, u32, u16, u8, isize, usize);
+
+impl Storable for String {
+    fn put(&self, w: &mut dyn Writer) {
+        w.str(self);
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        r.str()
+    }
+
+    fn dtype() -> &'static str {
+        "TEXT"
+    }
+}
+
+impl Show for String {
+    fn widget() -> Widget {
+        Widget::Text
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        Ok(raw.into())
+    }
+
+    fn text(&self) -> String {
+        self.clone()
+    }
+}
+
+impl Storable for f64 {
+    fn put(&self, w: &mut dyn Writer) {
+        w.flt(*self);
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        r.flt()
+    }
+
+    fn dtype() -> &'static str {
+        "REAL"
+    }
+}
+
+impl Show for f64 {
+    fn widget() -> Widget {
+        Widget::Flt
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        raw.parse::<f64>()
+            .map_err(|_| StoreError::Value(format!("bad float {raw}")))
+    }
+
+    fn text(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Storable for bool {
+    fn put(&self, w: &mut dyn Writer) {
+        w.int(if *self { 1 } else { 0 });
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        Ok(r.int()? != 0)
+    }
+
+    fn dtype() -> &'static str {
+        "INTEGER"
+    }
+}
+
+impl Show for bool {
+    fn widget() -> Widget {
+        Widget::Check
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        match raw {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" | "" => Ok(false),
+            _ => Err(StoreError::Value(format!("bad bool {raw}"))),
+        }
+    }
+
+    fn text(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Storable for Decimal {
+    fn put(&self, w: &mut dyn Writer) {
+        w.str(&self.to_string());
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        Decimal::from_str(&r.str()?)
+            .map_err(|_| StoreError::Value("bad decimal".into()))
+    }
+
+    fn dtype() -> &'static str {
+        "TEXT"
+    }
+}
+
+impl Show for Decimal {
+    fn widget() -> Widget {
+        Widget::Money
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        Decimal::from_str(raw).map_err(|_| StoreError::Value(format!("bad decimal {raw}")))
+    }
+
+    fn text(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Storable for DateTime<Utc> {
+    fn put(&self, w: &mut dyn Writer) {
+        w.int(self.timestamp());
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        DateTime::from_timestamp(r.int()?, 0)
+            .ok_or_else(|| StoreError::Value("bad datetime".into()))
+    }
+
+    fn dtype() -> &'static str {
+        "INTEGER"
+    }
+}
+
+impl Show for DateTime<Utc> {
+    fn widget() -> Widget {
+        Widget::Date
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        let bad = || StoreError::Value(format!("bad date {raw}"));
+        if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
+            return Ok(at.with_timezone(&Utc));
+        }
+        if let Ok(at) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M") {
+            return Ok(at.and_utc());
+        }
+        NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map(|day| day.and_time(NaiveTime::MIN).and_utc())
+            .map_err(|_| bad())
+    }
+
+    fn text(&self) -> String {
+        self.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
+impl Storable for NaiveDate {
+    fn put(&self, w: &mut dyn Writer) {
+        w.str(&self.format("%Y-%m-%d").to_string());
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        NaiveDate::parse_from_str(&r.str()?, "%Y-%m-%d")
+            .map_err(|_| StoreError::Value("bad date".into()))
+    }
+
+    fn dtype() -> &'static str {
+        "TEXT"
+    }
+}
+
+impl Show for NaiveDate {
+    fn widget() -> Widget {
+        Widget::Date
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map_err(|_| StoreError::Value(format!("bad date {raw}")))
+    }
+
+    fn text(&self) -> String {
+        self.format("%Y-%m-%d").to_string()
+    }
+}
+
+impl Storable for NaiveTime {
+    fn put(&self, w: &mut dyn Writer) {
+        w.str(&self.format("%H:%M:%S").to_string());
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        NaiveTime::parse_from_str(&r.str()?, "%H:%M:%S")
+            .map_err(|_| StoreError::Value("bad time".into()))
+    }
+
+    fn dtype() -> &'static str {
+        "TEXT"
+    }
+}
+
+impl Show for NaiveTime {
+    fn widget() -> Widget {
+        Widget::Text
+    }
+
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        NaiveTime::parse_from_str(raw, "%H:%M:%S")
+            .map_err(|_| StoreError::Value(format!("bad time {raw}")))
+    }
+
+    fn text(&self) -> String {
+        self.format("%H:%M").to_string()
+    }
+}
+
+impl<T: Storable> Storable for Option<T> {
+    fn put(&self, w: &mut dyn Writer) {
+        match self {
+            Some(value) => value.put(w),
+            None => w.nothing(),
+        }
+    }
+
+    fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        if r.nothing() {
+            Ok(None)
+        } else {
+            Ok(Some(T::take(r)?))
+        }
+    }
+
+    fn dtype() -> &'static str {
+        T::dtype()
+    }
+}
+
+pub struct Gather {
+    value: Value,
+}
+
+impl Gather {
+    pub fn new() -> Self {
+        Self { value: Value::Null }
+    }
+
+    pub fn value(self) -> Value {
+        self.value
+    }
+}
+
+impl Default for Gather {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Writer for Gather {
+    fn nothing(&mut self) {
+        self.value = Value::Null;
+    }
+
+    fn int(&mut self, value: i64) {
+        self.value = Value::Int(value);
+    }
+
+    fn flt(&mut self, value: f64) {
+        self.value = Value::Float(value);
+    }
+
+    fn str(&mut self, value: &str) {
+        self.value = Value::Str(value.into());
+    }
+}
+
+pub struct Slots {
+    values: Vec<Value>,
+}
+
+impl Slots {
+    pub fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    pub fn values(self) -> Vec<Value> {
+        self.values
+    }
+}
+
+impl Default for Slots {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Writer for Slots {
+    fn nothing(&mut self) {
+        self.values.push(Value::Null);
+    }
+
+    fn int(&mut self, value: i64) {
+        self.values.push(Value::Int(value));
+    }
+
+    fn flt(&mut self, value: f64) {
+        self.values.push(Value::Float(value));
+    }
+
+    fn str(&mut self, value: &str) {
+        self.values.push(Value::Str(value.into()));
+    }
+}
+
+pub struct Cells<'a> {
+    values: &'a [Value],
+    at: usize,
+}
+
+impl<'a> Cells<'a> {
+    pub fn new(values: &'a [Value]) -> Self {
+        Self { values, at: 0 }
+    }
+}
+
+impl Reader for Cells<'_> {
+    fn nothing(&mut self) -> bool {
+        match self.values.get(self.at) {
+            Some(Value::Null) => {
+                self.at += 1;
+                true
+            }
+            None => true,
+            Some(_) => false,
+        }
+    }
+
+    fn int(&mut self) -> Result<i64, StoreError> {
+        let bad = || StoreError::Value(format!("cell {} not int", self.at));
+        match self.values.get(self.at) {
+            Some(Value::Int(value)) => {
+                self.at += 1;
+                Ok(*value)
+            }
+            Some(Value::Bool(value)) => {
+                self.at += 1;
+                Ok(*value as i64)
+            }
+            Some(Value::DateTime(at)) => {
+                self.at += 1;
+                Ok(at.timestamp())
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    fn flt(&mut self) -> Result<f64, StoreError> {
+        let at = self.at;
+        let bad = || StoreError::Value(format!("cell {at} not float"));
+        match self.values.get(at) {
+            Some(Value::Float(value)) => {
+                self.at += 1;
+                Ok(*value)
+            }
+            Some(Value::Int(value)) => {
+                self.at += 1;
+                Ok(*value as f64)
+            }
+            Some(Value::Bool(value)) => {
+                self.at += 1;
+                Ok(*value as i64 as f64)
+            }
+            Some(Value::Decimal(value)) => {
+                self.at += 1;
+                value.to_string().parse::<f64>().map_err(|_| bad())
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    fn str(&mut self) -> Result<String, StoreError> {
+        let at = self.at;
+        let bad = || StoreError::Value(format!("cell {at} not str"));
+        match self.values.get(at) {
+            Some(Value::Str(value)) => {
+                self.at += 1;
+                Ok(value.clone())
+            }
+            Some(Value::Decimal(value)) => {
+                self.at += 1;
+                Ok(value.to_string())
+            }
+            Some(Value::DateTime(value)) => {
+                self.at += 1;
+                Ok(value.to_rfc3339())
+            }
+            _ => Err(bad()),
+        }
+    }
+}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

@@ -5,10 +5,13 @@ pub use crate::forgery::{Token, cookie, guard, named, token};
 pub use crate::form::{Errors, FieldError, Form, Valid};
 pub use crate::model::{
     Action, Check, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Pick, Query,
-    Repository, Rule, Run, Schema, Sort, Table, Tree, Type, id_column, key, many, related,
+    Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
 };
 pub use crate::settings::Settings;
-pub use crate::store::{Column, ColumnKind, Row, Store, StoreError, Value};
+pub use crate::store::{
+    Column, ColumnKind, Cells, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
+    Value, Widget, Writer,
+};
 pub use crate::urls::Routes;
 pub use crate::view::{Json, Request, Response, View, get_view, html, json, redirect, render};
 pub use askama::Template;

@@ -7,11 +7,11 @@ use axum::{
 };
 use rango_authentication::Current;
 use rango_core::{
-    Error, Repository, Response, Row, Store, Value,
+    Cells, Error, Repository, Response, Store, Value, Widget,
     forgery::{Token, cookie},
     model::{
         Action as Deed, Filter, Key, Model, Name, Only, Op, Order, Page, Query, Schema, Sort,
-        Table, Tree, Type, key, many,
+        Table, Tree, key,
     },
     view::{self, render},
 };
@@ -199,7 +199,7 @@ pub(crate) async fn list<M: Model>(
             let display: Vec<Tree> = other
                 .fields
                 .iter()
-                .filter(|field| matches!(field.kind.flat(), Type::Str))
+                .filter(|field| field.load() == Widget::Text)
                 .map(|field| {
                     Tree::Leaf(Filter {
                         field: field.name,
@@ -227,7 +227,7 @@ pub(crate) async fn list<M: Model>(
             let pk = other
                 .fields
                 .iter()
-                .position(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+                .position(|field| field.id || field.keyed)
                 .unwrap_or(0);
             related.insert(i, rows.iter().map(|row| text(row.values.get(pk))).collect());
         }
@@ -298,7 +298,7 @@ pub(crate) async fn list<M: Model>(
     }
     let filters = fields
         .iter()
-        .filter(|field| field.kind != Type::Id && !many(&field.kind))
+        .filter(|field| !field.id && !field.many)
         .map(|field| {
             filter_input(
                 field,
@@ -436,7 +436,7 @@ pub(crate) async fn detail<M: Model>(
                 .iter()
                 .enumerate()
                 .filter(|(_, field)| {
-                    !matches!(field.kind.flat(), Type::Id | Type::Key) && !many(&field.kind)
+                    !field.id && !field.keyed && !field.many
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -477,12 +477,12 @@ pub(crate) async fn show_new<M: Model>(
     let fixed = M::readonly();
     let inputs = M::fields()
         .iter()
-        .filter(|field| field.kind != Type::Id)
+        .filter(|field| !field.id)
         .map(|field| {
             if fixed.contains(&field.name) {
-                locked(field, field.default.as_ref())
+                locked(field, Some(&field.initial()))
             } else {
-                input(field, field.default.as_ref())
+                input(field, Some(&field.initial()))
             }
         })
         .collect();
@@ -513,13 +513,13 @@ pub(crate) async fn create<M: Model>(
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
     for field in &fields {
-        if field.kind == Type::Id {
+        if field.id {
             values.push(Value::int(0));
             continue;
         }
         if fixed.contains(&field.name) {
-            inputs.push(locked(field, field.default.as_ref()));
-            values.push(field.default.clone().unwrap_or(Value::Null));
+            inputs.push(locked(field, Some(&field.initial())));
+            values.push(field.initial());
             continue;
         }
         let raw = map
@@ -547,7 +547,7 @@ pub(crate) async fn create<M: Model>(
             errors: problems,
         });
     }
-    let mut model = M::from_row(&Row { values })?;
+    let mut model = M::read(&mut Cells::new(&values))?;
     repository.save(&mut model).await?;
     log(&history, M::table(), &model.id(), Action::Create, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
@@ -568,11 +568,11 @@ pub(crate) async fn show_edit<M: Model>(
     let mut inputs = Vec::new();
     let fixed = M::readonly();
     for field in M::fields() {
-        if field.kind == Type::Id {
+        if field.id {
             continue;
         }
         let old = slots.next();
-        if fixed.contains(&field.name) || matches!(field.kind.flat(), Type::Key) {
+        if fixed.contains(&field.name) || field.keyed {
             inputs.push(locked(&field, old));
         } else {
             inputs.push(input(&field, old));
@@ -613,11 +613,11 @@ pub(crate) async fn replace<M: Model>(
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
     for field in &fields {
-        if field.kind == Type::Id {
+        if field.id {
             continue;
         }
         let old = slots.next();
-        if matches!(field.kind.flat(), Type::Key) {
+        if field.keyed {
             continue;
         }
         if fixed.contains(&field.name) {
@@ -650,7 +650,7 @@ pub(crate) async fn replace<M: Model>(
             errors: problems,
         });
     }
-    let model = M::from_row(&Row { values })?;
+    let model = M::read(&mut Cells::new(&values))?;
     repository.update(&model).await?;
     log(&history, M::table(), &key::<M>(&id), Action::Edit, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))

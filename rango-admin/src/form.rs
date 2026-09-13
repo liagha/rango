@@ -1,22 +1,30 @@
-use rango_core::chrono::NaiveDateTime;
-use rango_core::model::{Field, Type, many};
-use rango_core::{Error, store::Value};
+use rango_core::model::Field;
+use rango_core::{
+    store::{Cells, Gather, Value, Widget},
+    Error,
+};
 
 use super::row::text;
 
+pub(crate) fn shown(field: &Field, value: Option<&Value>) -> String {
+    value
+        .map(|v| (field.text)(&mut Cells::new(std::slice::from_ref(v))))
+        .unwrap_or_default()
+}
+
 pub(crate) fn input(field: &Field, value: Option<&Value>) -> String {
-    let shown = match (field.kind.flat(), value) {
-        (Type::Moment, Some(Value::DateTime(at))) => at.format("%Y-%m-%dT%H:%M").to_string(),
-        _ => text(value),
+    let shown_text = match (field.load(), value) {
+        (Widget::Date, Some(Value::DateTime(at))) => at.format("%Y-%m-%dT%H:%M").to_string(),
+        _ => shown(field, value),
     };
-    control(field, &shown, matches!(value, Some(Value::Bool(true))))
+    control(field, &shown_text, matches!(value, Some(Value::Bool(true))))
 }
 
 pub(crate) fn input_raw(field: &Field, raw: &str) -> String {
     control(
         field,
         raw,
-        matches!(field.kind.flat(), Type::Bool) && raw == "on",
+        field.load() == Widget::Check && raw == "on",
     )
 }
 
@@ -29,68 +37,51 @@ pub(crate) fn locked(field: &Field, value: Option<&Value>) -> String {
 }
 
 pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error> {
-    if many(&field.kind) {
+    if field.many {
         return Ok(Value::Null);
     }
-    let kind = field.kind.flat();
     let raw = raw.map(String::as_str).unwrap_or("");
-    if raw.is_empty() && matches!(kind, Type::Bool) {
-        return Ok(Value::bool(false));
+    if raw.is_empty() && field.load() == Widget::Check {
+        return Ok(Value::int(0));
     }
     if raw.is_empty() {
-        return if field.kind.is_optional() {
+        return if field.optional {
             Ok(Value::Null)
         } else {
             Err(Error::BadRequest(format!("{} is required", field.name)))
         };
     }
-    match kind {
-        Type::Id | Type::Opt(_) => Ok(Value::Null),
-        Type::Str | Type::Key => Ok(Value::str(raw)),
-        Type::Int => raw
-            .parse::<i64>()
-            .map(Value::int)
-            .map_err(|_| bad(field, "an integer")),
-        Type::Moment => NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M")
-            .map(|at| Value::datetime(at.and_utc()))
-            .map_err(|_| bad(field, "a date and time")),
-        Type::Float => raw
-            .parse::<f64>()
-            .map(Value::float)
-            .map_err(|_| bad(field, "a number")),
-        Type::Decimal => raw
-            .parse::<rango_core::decimal::Decimal>()
-            .map(Value::decimal)
-            .map_err(|_| bad(field, "a decimal")),
-        Type::Bool => Ok(Value::bool(raw == "on")),
-        Type::Many => Ok(Value::Null),
-    }
+    let mut gather = Gather::new();
+    (field.parse)(raw, &mut gather)?;
+    Ok(gather.value())
 }
 
 fn control(field: &Field, value: &str, checked: bool) -> String {
+    if field.id || field.many {
+        return String::new();
+    }
     let name = field.name;
     let label = format!(r#"<label for="admin-{name}">{name}</label>"#);
-    match field.kind.flat() {
-        Type::Id | Type::Many | Type::Opt(_) => String::new(),
-        Type::Str | Type::Key | Type::Decimal => {
+    match field.load() {
+        Widget::Text | Widget::Money => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="text" value="{}">"#,
                 escape(value)
             )
         }
-        Type::Int | Type::Float => {
+        Widget::Int | Widget::Flt => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="number" value="{}">"#,
                 escape(value)
             )
         }
-        Type::Moment => {
+        Widget::Date => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="datetime-local" value="{}">"#,
                 escape(value)
             )
         }
-        Type::Bool => {
+        Widget::Check => {
             format!(
                 r#"{label}<input id="admin-{name}" name="{name}" type="checkbox"{}>"#,
                 if checked { " checked" } else { "" }
@@ -99,32 +90,30 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
     }
 }
 
-fn bad(field: &Field, want: &str) -> Error {
-    Error::BadRequest(format!("{} must be {want}", field.name))
-}
-
 pub(crate) fn filter_input(field: &Field, value: &str) -> String {
+    if field.id || field.many {
+        return String::new();
+    }
     let name = field.name;
     let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
     let value = escape(value);
-    match field.kind.flat() {
-        Type::Id | Type::Many | Type::Opt(_) => String::new(),
-        Type::Str | Type::Key | Type::Decimal => {
+    match field.load() {
+        Widget::Text | Widget::Money => {
             format!(
                 r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
             )
         }
-        Type::Int | Type::Float => {
+        Widget::Int | Widget::Flt => {
             format!(
                 r#"{label}<input id="filter-{name}" name="{name}" type="number" value="{value}">"#
             )
         }
-        Type::Moment => {
+        Widget::Date => {
             format!(
                 r#"{label}<input id="filter-{name}" name="{name}" type="date" value="{value}">"#
             )
         }
-        Type::Bool => {
+        Widget::Check => {
             let picked = |want: &str| if value == want { " selected" } else { "" };
             format!(
                 r#"{label}<select id="filter-{name}" name="{name}"><option value="">Any</option><option value="1"{}>Yes</option><option value="0"{}>No</option></select>"#,
@@ -146,10 +135,7 @@ fn escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn field(kind: Type) -> Field {
-        Field::new("f", kind)
-    }
+    use rango_core::chrono::{DateTime, NaiveDateTime, Utc};
 
     fn raw(text: &str) -> String {
         text.to_string()
@@ -157,33 +143,39 @@ mod tests {
 
     #[test]
     fn values() {
+        let text_field = Field::str("f");
         assert_eq!(
-            value(&field(Type::Str), Some(&raw("hi"))).unwrap(),
+            value(&text_field, Some(&raw("hi"))).unwrap(),
             Value::str("hi")
         );
+        let int_field = Field::cell::<i64>("f");
         assert_eq!(
-            value(&field(Type::Int), Some(&raw("3"))).unwrap(),
+            value(&int_field, Some(&raw("3"))).unwrap(),
             Value::int(3)
         );
-        assert!(value(&field(Type::Int), Some(&raw("x"))).is_err());
-        assert!(value(&field(Type::Int), None).is_err());
-        assert_eq!(value(&field(Type::Bool), None).unwrap(), Value::bool(false));
+        assert!(value(&int_field, Some(&raw("x"))).is_err());
+        assert!(value(&int_field, None).is_err());
+        let check_field = Field::check("f");
+        assert_eq!(value(&check_field, None).unwrap(), Value::int(0));
         assert_eq!(
-            value(&field(Type::Bool), Some(&raw("on"))).unwrap(),
-            Value::bool(true)
+            value(&check_field, Some(&raw("on"))).unwrap(),
+            Value::int(1)
         );
-        let optional = Field::new("f", Type::Str.optional());
+        let optional = Field::cell::<String>("f").optional();
         assert_eq!(value(&optional, None).unwrap(), Value::Null);
     }
 
     #[test]
     fn dates() {
-        let field = field(Type::Moment);
+        let field = Field::cell::<DateTime<Utc>>("f");
         match value(&field, Some(&raw("2026-09-09T12:30"))).unwrap() {
-            Value::DateTime(at) => {
-                assert_eq!(at.format("%Y-%m-%dT%H:%M").to_string(), "2026-09-09T12:30")
+            Value::Int(stamp) => {
+                let at = NaiveDateTime::parse_from_str("2026-09-09T12:30", "%Y-%m-%dT%H:%M")
+                    .unwrap()
+                    .and_utc();
+                assert_eq!(stamp, at.timestamp());
             }
-            _ => panic!("not a datetime"),
+            _ => panic!("not an int"),
         }
         assert!(value(&field, Some(&raw("not-a-date"))).is_err());
         assert!(value(&field, None).is_err());

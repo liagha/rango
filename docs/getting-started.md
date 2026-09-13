@@ -2,12 +2,11 @@
 
 ## Config
 
-Add `rango` to a Cargo project (edition 2024):
+Add `rango` to a Cargo project (edition 2024) — that is the only dependency:
 
 ```toml
 [dependencies]
 rango = { path = "/path/to/rango" }
-tokio = { version = "1.53", features = ["full"] }
 ```
 
 ## Scaffold a project
@@ -76,8 +75,7 @@ Handlers are axum functions with extractors injected from the request:
 ```rust
 use rango::prelude::*;
 
-#[derive(Template)]
-#[template(path = "index.html", askama = rango::askama)]
+#[rango::template(path = "index.html")]
 struct Index {
     posts: Vec<Post>,
 }
@@ -94,7 +92,7 @@ Wire routes and models into the app:
 use rango::Rango;
 use rango::prelude::*;
 
-#[tokio::main]
+#[rango::main]
 async fn main() -> ExitCode {
     Rango::serve(env!("CARGO_MANIFEST_DIR"))
         .model::<Post>()
@@ -126,8 +124,7 @@ Templates live in `templates/` next to `CARGO_MANIFEST_DIR`:
 Declare a struct per page and render it:
 
 ```rust
-#[derive(Template)]
-#[template(path = "index.html", askama = rango::askama)]
+#[rango::template(path = "index.html")]
 struct Index {
     posts: Vec<Post>,
 }
@@ -140,12 +137,11 @@ async fn list(repository: Repository<Post>) -> Result<Response, Error> {
 
 ## Forms
 
-Deserialize form posts with the `Form` extractor. Add a `Valid` impl for
+Handle form posts with the `Form` extractor. Add a `Valid` impl for
 server-side validation and re-render with errors on failure:
 
 ```rust
-#[derive(Deserialize, Default)]
-#[serde(crate = "rango::serde")]
+#[rango::form]
 struct Contact {
     name: String,
     message: String,
@@ -210,8 +206,7 @@ Read a JSON body with the `Json` extractor:
 use rango::chrono::Utc;
 use rango::prelude::*;
 
-#[derive(Deserialize)]
-#[serde(crate = "rango::serde")]
+#[rango::input]
 struct PostInput {
     title: String,
     body: String,
@@ -229,8 +224,8 @@ async fn create(Json(input): Json<PostInput>) -> Result<Response, Error> {
 }
 ```
 
-`Json<T>` requires `T: Deserialize`, so receive data into a `Deserialize`
-struct. In the response, `DateTime` serializes to RFC 3339 and `Decimal` to its
+`Json<T>` receives data into an input struct declared with `#[rango::input]`.
+In the response, `DateTime` serializes to RFC 3339 and `Decimal` to its
 plain string form. The `serde_json` crate is re-exported as `rango::serde_json`
 (and `rango::prelude::serde_json`).
 

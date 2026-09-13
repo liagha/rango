@@ -1,8 +1,8 @@
 use rango_authentication::Current;
 use rango_core::{
-    Repository, Row, StoreError, Value,
     chrono::{DateTime, Utc},
-    model::{Field, Model, Table, Type},
+    model::{Field, Model, Table},
+    Reader, Repository, Storable, StoreError, Value, Writer,
 };
 
 use super::row::text;
@@ -25,43 +25,44 @@ impl Model for History {
     fn fields() -> Vec<Field> {
         vec![
             Field::id(),
-            Field::new("model", Type::Str),
-            Field::new("row", Type::Str),
-            Field::new("action", Type::Str),
-            Field::new("user", Type::Str),
-            Field::new("at", Type::Moment),
+            Field::str("model"),
+            Field::str("row"),
+            Field::str("action"),
+            Field::str("user"),
+            Field::cell::<DateTime<Utc>>("at"),
         ]
     }
 
-    fn row(&self) -> Vec<Value> {
-        vec![
-            Value::str(&self.model),
-            Value::str(&self.row),
-            Value::str(self.action.name()),
-            Value::str(&self.user),
-            Value::datetime(self.at),
-        ]
+    fn write(&self, w: &mut dyn Writer) {
+        Storable::put(&self.model, w);
+        Storable::put(&self.row, w);
+        w.str(self.action.name());
+        Storable::put(&self.user, w);
+        Storable::put(&self.at, w);
     }
 
-    fn from_row(row: &Row) -> Result<Self, StoreError> {
+    fn read(r: &mut dyn Reader) -> Result<Self, StoreError> {
+        let id = Storable::take(r)?;
+        let model = Storable::take(r)?;
+        let row = Storable::take(r)?;
+        let action: String = Storable::take(r)?;
         Ok(Self {
-            id: row.int(0)?,
-            model: row.str(1)?,
-            row: row.str(2)?,
-            action: Action::parse(&row.str(3)?)?,
-            user: row.str(4)?,
-            at: row.datetime(5)?,
+            id,
+            model,
+            row,
+            action: Action::parse(&action)?,
+            user: Storable::take(r)?,
+            at: Storable::take(r)?,
         })
     }
 
-    fn set_id(&mut self, id: Value) {
-        if let Value::Int(id) = id {
-            self.id = id;
-        }
+    fn write_id(&self, w: &mut dyn Writer) {
+        Storable::put(&self.id, w);
     }
 
-    fn id(&self) -> Value {
-        Value::int(self.id)
+    fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError> {
+        self.id = Storable::take(r)?;
+        Ok(())
     }
 }
 

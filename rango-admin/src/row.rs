@@ -1,6 +1,6 @@
 use rango_core::{
     chrono::{DateTime, Utc},
-    model::{Field, Model, Name, Type, many},
+    model::{Field, Model, Name},
     store::Value,
 };
 
@@ -27,7 +27,7 @@ pub(crate) fn text(value: Option<&Value>) -> String {
 pub(crate) fn id_of(values: &[Value], fields: &[Field]) -> String {
     fields
         .iter()
-        .position(|field| matches!(field.kind.flat(), Type::Id | Type::Key))
+        .position(|field| field.id || field.keyed)
         .and_then(|i| values.get(i))
         .map(|value| match value {
             Value::Int(id) => id.to_string(),
@@ -42,7 +42,7 @@ pub(crate) fn locate(names: &[Name], fields: &[Field]) -> Vec<usize> {
     for name in names {
         if let Some(i) = fields
             .iter()
-            .position(|field| field.name == *name && field.kind != Type::Id && !many(&field.kind))
+            .position(|field| field.name == *name && !field.id && !field.many)
             && !out.contains(&i)
         {
             out.push(i);
@@ -55,15 +55,15 @@ pub(crate) fn with_id<M: Model>(model: &M, fields: &[Field]) -> Vec<Value> {
     let mut out = vec![model.id()];
     let mut values = model.row().into_iter();
     for field in fields {
-        if field.kind == Type::Id {
+        if field.id {
             continue;
         }
-        if many(&field.kind) {
+        if field.many {
             out.push(Value::Null);
             continue;
         }
         let value = values.next().unwrap_or(Value::Null);
-        if matches!(field.kind.flat(), Type::Key) {
+        if field.keyed {
             continue;
         }
         out.push(value);
@@ -75,7 +75,7 @@ pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
     let mut out = Vec::with_capacity(fields.len());
     let mut slots = values.iter();
     for field in fields {
-        if many(&field.kind) {
+        if field.many {
             out.push(Value::Null);
         } else {
             out.push(slots.next().cloned().unwrap_or(Value::Null));
@@ -85,63 +85,58 @@ pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rango_core::{
-        Row, StoreError,
-        chrono::{TimeZone, Utc},
-        model::Table,
-    };
+    mod tests {
+        use super::*;
+        use rango_core::{
+            chrono::{TimeZone, Utc},
+            model::Table,
+            StoreError, Storable,
+        };
 
-    #[derive(Clone)]
-    struct Thread {
-        id: i64,
-        title: String,
-    }
+        #[derive(Clone)]
+        struct Thread {
+            id: i64,
+            title: String,
+        }
 
-    impl Model for Thread {
-        fn table() -> Table {
-            Table("threads")
+        impl Model for Thread {
+            fn table() -> Table {
+                Table("threads")
+            }
+
+            fn fields() -> Vec<Field> {
+                vec![Field::id(), Field::str("title"), Field::many("tags")]
+            }
+
+            fn write(&self, w: &mut dyn rango_core::Writer) {
+                Storable::put(&self.title, w);
+            }
+
+            fn read(r: &mut dyn rango_core::Reader) -> Result<Self, StoreError> {
+                Ok(Self {
+                    id: Storable::take(r)?,
+                    title: Storable::take(r)?,
+                })
+            }
+
+            fn write_id(&self, w: &mut dyn rango_core::Writer) {
+                Storable::put(&self.id, w);
+            }
+
+            fn read_id(&mut self, r: &mut dyn rango_core::Reader) -> Result<(), StoreError> {
+                self.id = Storable::take(r)?;
+                Ok(())
+            }
         }
 
         fn fields() -> Vec<Field> {
             vec![
                 Field::id(),
-                Field::new("title", Type::Str),
-                Field::new("tags", Type::Many),
+                Field::str("title"),
+                Field::many("tags"),
+                Field::str("extra"),
             ]
         }
-
-        fn row(&self) -> Vec<Value> {
-            vec![Value::str(&self.title)]
-        }
-
-        fn from_row(row: &Row) -> Result<Self, StoreError> {
-            Ok(Self {
-                id: row.int(0)?,
-                title: row.str(1)?,
-            })
-        }
-
-        fn set_id(&mut self, id: Value) {
-            if let Value::Int(id) = id {
-                self.id = id;
-            }
-        }
-
-        fn id(&self) -> Value {
-            Value::int(self.id)
-        }
-    }
-
-    fn fields() -> Vec<Field> {
-        vec![
-            Field::id(),
-            Field::new("title", Type::Str),
-            Field::new("tags", Type::Many),
-            Field::new("extra", Type::Str),
-        ]
-    }
 
     #[test]
     fn texts() {
@@ -158,10 +153,10 @@ mod tests {
 
     #[test]
     fn ids() {
-        let fields = vec![Field::id(), Field::new("title", Type::Str)];
+        let fields = vec![Field::id(), Field::str("title")];
         let values = vec![Value::int(7), Value::str("hi")];
         assert_eq!(id_of(&values, &fields), "7");
-        let keyed = vec![Field::key("sku"), Field::new("name", Type::Str)];
+        let keyed = vec![Field::key::<String>("sku"), Field::str("name")];
         let products = vec![Value::str("a1"), Value::str("widget")];
         assert_eq!(id_of(&products, &keyed), "a1");
     }
