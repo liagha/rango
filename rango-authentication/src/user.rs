@@ -64,6 +64,22 @@ impl Model for User {
 }
 
 impl User {
+    /// Validates a password against the minimum length policy.
+    pub(crate) fn check_password(password: &str) -> Result<(), Error> {
+        if password.len() < 8 {
+            return Err(Error::BadRequest(
+                "password must be at least 8 characters".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bcrypt hash with the default cost.
+    pub(crate) fn hash_password(password: &str) -> Result<String, Error> {
+        bcrypt::hash(password, bcrypt::DEFAULT_COST)
+            .map_err(|fail| Error::Server(fail.to_string()))
+    }
+
     /// Validates and saves a new user, returning an error on bad input or a taken username.
     pub async fn register(
         store: Arc<dyn Store>,
@@ -75,13 +91,8 @@ impl User {
         if username.is_empty() {
             return Err(Error::BadRequest("username is required".into()));
         }
-        if password.len() < 8 {
-            return Err(Error::BadRequest(
-                "password must be at least 8 characters".into(),
-            ));
-        }
-        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
-            .map_err(|fail| Error::Server(fail.to_string()))?;
+        Self::check_password(password)?;
+        let hash = Self::hash_password(password)?;
         let mut user = User {
             id: 0,
             username: username.into(),

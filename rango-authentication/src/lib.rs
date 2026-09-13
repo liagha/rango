@@ -35,9 +35,11 @@ pub use user::User;
 pub struct Authentication {
     secret: String,
     login: String,
-    cookie: String,
+    name: String,
     days: i64,
     signup: bool,
+    max: u32,
+    minutes: i64,
     attempts: Arc<Mutex<Attempts>>,
 }
 
@@ -51,9 +53,11 @@ impl Authentication {
         Self {
             secret: secret.into(),
             login: "/login".into(),
-            cookie: "session".into(),
+            name: "session".into(),
             days: 14,
             signup: false,
+            max: 5,
+            minutes: 15,
             attempts: Arc::new(Mutex::new(Attempts::new(5, 15))),
         }
     }
@@ -66,7 +70,7 @@ impl Authentication {
 
     /// Sets the session cookie name.
     pub fn cookie(mut self, name: impl Into<String>) -> Self {
-        self.cookie = name.into();
+        self.name = name.into();
         self
     }
 
@@ -83,18 +87,16 @@ impl Authentication {
     }
 
     /// Sets the failed-login attempts before lockout.
-    pub fn attempts(self, max: u32) -> Self {
-        if let Ok(mut attempts) = self.attempts.lock() {
-            attempts.max = max;
-        }
+    pub fn attempts(mut self, max: u32) -> Self {
+        self.max = max;
+        self.attempts = Arc::new(Mutex::new(Attempts::new(max, self.minutes)));
         self
     }
 
     /// Sets the lockout window in minutes.
-    pub fn lockout(self, minutes: i64) -> Self {
-        if let Ok(mut attempts) = self.attempts.lock() {
-            attempts.minutes = minutes;
-        }
+    pub fn lockout(mut self, minutes: i64) -> Self {
+        self.minutes = minutes;
+        self.attempts = Arc::new(Mutex::new(Attempts::new(self.max, minutes)));
         self
     }
 
@@ -153,7 +155,7 @@ impl Authentication {
     }
 
     fn peek(&self, req: &Request) -> (Option<Claim>, Option<Arc<dyn Store>>) {
-        let raw = cookie(req.headers(), &self.cookie).and_then(|raw| claim(&raw));
+        let raw = cookie(req.headers(), &self.name).and_then(|raw| claim(&raw));
         let store = req.extensions().get::<Arc<dyn Store>>().cloned();
         (raw, store)
     }
@@ -167,10 +169,13 @@ impl Authentication {
         if !verify(&self.secret, id, exp, &sig) {
             return None;
         }
-        Repository::<User>::new(store)
-            .get(&Value::int(id))
-            .await
-            .ok()?
+        match Repository::<User>::new(store).get(&Value::int(id)).await {
+            Ok(user) => user,
+            Err(failed) => {
+                tracing::warn!(error = %failed, "session lookup failed");
+                None
+            }
+        }
     }
 }
 

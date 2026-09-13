@@ -20,6 +20,7 @@ bcrypt = "0.17"
 hmac = "0.12"
 sha2 = "0.10"
 serde_urlencoded.workspace = true
+tracing.workspace = true
 askama = { workspace = true, optional = true }
 
 [dev-dependencies]

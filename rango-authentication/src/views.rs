@@ -20,9 +20,9 @@ use crate::session::{safe_next, set_cookie, sign, token};
 impl Authentication {
     /// Builds the login, logout, register and password routes behind the session middleware.
     pub fn routes(&self) -> Routes {
-        let show = self.clone();
-        let enter = self.clone();
-        let exit = self.clone();
+        let login_show = self.clone();
+        let login_enter = self.clone();
+        let logout = self.clone();
         let signup_show = self.clone();
         let signup_enter = self.clone();
         let password_show = self.clone();
@@ -35,8 +35,10 @@ impl Authentication {
                           headers: HeaderMap,
                           guard: Option<Extension<Token>>,
                           Query(query): Query<NextQuery>| {
-                        let show = show.clone();
-                        async move { show.show(current, headers, guard, query.next).await }
+                        let login_show = login_show.clone();
+                        async move {
+                            login_show.show_login(current, headers, guard, query.next).await
+                        }
                     },
                 )
                 .post(
@@ -44,16 +46,16 @@ impl Authentication {
                           headers: HeaderMap,
                           guard: Option<Extension<Token>>,
                           Form(form): Form<LoginForm>| {
-                        let enter = enter.clone();
-                        async move { enter.enter(store.0, headers, guard, form).await }
+                        let login_enter = login_enter.clone();
+                        async move { login_enter.enter(store.0, headers, guard, form).await }
                     },
                 ),
             )
             .route(
                 "/logout",
                 post(move || {
-                    let exit = exit.clone();
-                    async move { exit.exit().await }
+                    let logout = logout.clone();
+                    async move { logout.logout().await }
                 }),
             )
             .route(
@@ -102,7 +104,7 @@ impl Authentication {
         self.session(routes)
     }
 
-    async fn show(
+    async fn show_login(
         &self,
         current: Current,
         headers: HeaderMap,
@@ -164,7 +166,7 @@ impl Authentication {
                 let mut response = view::redirect(&next);
                 response
                     .headers_mut()
-                    .insert(SET_COOKIE, self.cookie_for(&user));
+                    .insert(SET_COOKIE, self.issue(&user));
                 Ok(response)
             }
             None => {
@@ -176,10 +178,10 @@ impl Authentication {
         }
     }
 
-    fn cookie_for(&self, user: &User) -> axum::http::HeaderValue {
+    fn issue(&self, user: &User) -> axum::http::HeaderValue {
         let exp = Utc::now().timestamp() + self.days * 86400;
         let raw = format!("{}.{}.{}", user.id, exp, sign(&self.secret, user.id, exp));
-        set_cookie(&self.cookie, &raw, self.days * 86400)
+        set_cookie(&self.name, &raw, self.days * 86400)
     }
 
     async fn show_signup(
@@ -220,7 +222,7 @@ impl Authentication {
                 let mut response = view::redirect("/");
                 response
                     .headers_mut()
-                    .insert(SET_COOKIE, self.cookie_for(&user));
+                    .insert(SET_COOKIE, self.issue(&user));
                 Ok(response)
             }
             Err(Error::BadRequest(msg)) => failed(msg),
@@ -265,14 +267,13 @@ impl Authentication {
         if !bcrypt::verify(&form.current, &user.password).unwrap_or(false) {
             return failed("Current password is incorrect.".into());
         }
-        if form.password.len() < 8 {
-            return failed("Password must be at least 8 characters.".into());
+        if let Err(error) = User::check_password(&form.password) {
+            return failed(error.to_string());
         }
         if form.password != form.confirm {
             return failed("Passwords do not match.".into());
         }
-        user.password = bcrypt::hash(&form.password, bcrypt::DEFAULT_COST)
-            .map_err(|fail| Error::Server(fail.to_string()))?;
+        user.password = User::hash_password(&form.password)?;
         Repository::new(store).update(&user).await?;
         render(Password {
             error: String::new(),
@@ -281,11 +282,11 @@ impl Authentication {
         })
     }
 
-    async fn exit(&self) -> axum::response::Response {
+    async fn logout(&self) -> axum::response::Response {
         let mut response = view::redirect(&self.login);
         response
             .headers_mut()
-            .insert(SET_COOKIE, set_cookie(&self.cookie, "", 0));
+            .insert(SET_COOKIE, set_cookie(&self.name, "", 0));
         response
     }
 }
