@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub use crate::store::{
-    Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
+    Action, Check, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
     Run, Schema, Sort, Table, Tree,
 };
 

@@ -36,11 +36,23 @@ impl std::fmt::Display for Name {
     }
 }
 
-/// A fixed set of (value, label) choices for a field.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Pick {
-    /// Allowed choices; first element is the stored value.
-    pub options: &'static [(&'static str, &'static str)],
+/// A fixed (value, label) option for a field's choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Choice {
+    /// The stored value.
+    pub value: Name,
+    /// The label shown to users.
+    pub label: &'static str,
+}
+
+impl Choice {
+    /// A choice from its stored value and label.
+    pub const fn of(value: &'static str, label: &'static str) -> Self {
+        Self {
+            value: Name(value),
+            label,
+        }
+    }
 }
 
 /// A named checkbox constraint.
@@ -278,8 +290,8 @@ pub struct Field {
     pub unique: bool,
     /// Indexed column.
     pub index: bool,
-    /// Fixed choice list, if any.
-    pub pick: Option<Pick>,
+    /// Fixed (value, label) choices rendering as a select; empty means a plain input.
+    pub choices: &'static [Choice],
     /// Default value factory, if any.
     pub default: Option<DefaultFn>,
     /// Reference to another table, if any.
@@ -309,7 +321,7 @@ impl Field {
             optional: false,
             unique: false,
             index: false,
-            pick: None,
+            choices: &[],
             default: None,
             link: None,
             on_delete: Action::cascade(),
@@ -359,7 +371,7 @@ impl Field {
             optional: false,
             unique: false,
             index: false,
-            pick: None,
+            choices: &[],
             default: None,
             link: None,
             on_delete: Action::cascade(),
@@ -372,6 +384,13 @@ impl Field {
     /// Marks the column nullable.
     pub fn optional(mut self) -> Self {
         self.optional = true;
+        self
+    }
+
+    /// Fixed (value, label) choices rendering as a select.
+    pub fn choices(mut self, options: &'static [Choice]) -> Self {
+        self.choices = options;
+        self.widget = || Widget::Choice;
         self
     }
 

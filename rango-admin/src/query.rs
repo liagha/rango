@@ -55,6 +55,11 @@ pub(crate) fn tree(
                 })),
                 Err(_) => return Tree::Or(Vec::new()),
             },
+            Widget::Choice => parts.push(Tree::Leaf(Filter {
+                field: field.name,
+                op: Op::Eq,
+                value: Value::str(raw),
+            })),
             Widget::Check => parts.push(Tree::Leaf(Filter {
                 field: field.name,
                 op: Op::Eq,

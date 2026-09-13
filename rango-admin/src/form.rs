@@ -7,6 +7,17 @@ use rango_core::{
 use super::row::text;
 
 pub(crate) fn shown(field: &Field, value: Option<&Value>) -> String {
+    let label = value.and_then(|v| match v {
+        Value::Str(stored) => field
+            .choices
+            .iter()
+            .find(|choice| choice.value.as_str() == stored)
+            .map(|choice| choice.label),
+        _ => None,
+    });
+    if let Some(label) = label {
+        return label.to_string();
+    }
     value
         .map(|v| (field.text)(&mut Cells::new(std::slice::from_ref(v))))
         .unwrap_or_default()
@@ -14,6 +25,7 @@ pub(crate) fn shown(field: &Field, value: Option<&Value>) -> String {
 
 pub(crate) fn input(field: &Field, value: Option<&Value>) -> String {
     let shown_text = match (field.load(), value) {
+        (Widget::Choice, Some(Value::Str(stored))) => stored.clone(),
         (Widget::Date, Some(Value::DateTime(at))) => at.format("%Y-%m-%dT%H:%M").to_string(),
         _ => shown(field, value),
     };
@@ -37,6 +49,15 @@ pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error>
         return Ok(Value::Null);
     }
     let raw = raw.map(String::as_str).unwrap_or("");
+    if !field.choices.is_empty()
+        && !raw.is_empty()
+        && !field.choices.iter().any(|choice| choice.value.as_str() == raw)
+    {
+        return Err(Error::BadRequest(format!(
+            "{} is not a valid choice",
+            field.name
+        )));
+    }
     if raw.is_empty() && field.load() == Widget::Check {
         return Ok(Value::int(0));
     }
@@ -83,6 +104,28 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
                 if checked { " checked" } else { "" }
             )
         }
+        Widget::Choice => {
+            let mut options = String::new();
+            if field.optional || value.is_empty() {
+                options.push_str(r#"<option value="">---------</option>"#);
+            }
+            for choice in field.choices {
+                let picked = if choice.value.as_str() == value {
+                    " selected"
+                } else {
+                    ""
+                };
+                options.push_str(&format!(
+                    r#"<option value="{}"{}>{}</option>"#,
+                    escape(choice.value.as_str()),
+                    picked,
+                    escape(choice.label)
+                ));
+            }
+            format!(
+                r#"{label}<select id="admin-{name}" name="{name}">{options}</select>"#
+            )
+        }
     }
 }
 
@@ -92,29 +135,49 @@ pub(crate) fn filter_input(field: &Field, value: &str) -> String {
     }
     let name = field.name;
     let label = format!(r#"<label for="filter-{name}">{name}</label>"#);
-    let value = escape(value);
+    let shown = escape(value);
     match field.load() {
         Widget::Text | Widget::Money => {
             format!(
-                r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{value}">"#
+                r#"{label}<input id="filter-{name}" name="{name}" type="text" value="{shown}">"#
             )
         }
         Widget::Int | Widget::Flt => {
             format!(
-                r#"{label}<input id="filter-{name}" name="{name}" type="number" value="{value}">"#
+                r#"{label}<input id="filter-{name}" name="{name}" type="number" value="{shown}">"#
             )
         }
         Widget::Date => {
             format!(
-                r#"{label}<input id="filter-{name}" name="{name}" type="date" value="{value}">"#
+                r#"{label}<input id="filter-{name}" name="{name}" type="date" value="{shown}">"#
             )
         }
         Widget::Check => {
-            let picked = |want: &str| if value == want { " selected" } else { "" };
+            let picked = |want: &str| if shown == want { " selected" } else { "" };
             format!(
                 r#"{label}<select id="filter-{name}" name="{name}"><option value="">Any</option><option value="1"{}>Yes</option><option value="0"{}>No</option></select>"#,
                 picked("1"),
                 picked("0")
+            )
+        }
+        Widget::Choice => {
+            let mut options = String::new();
+            options.push_str(r#"<option value="">Any</option>"#);
+            for choice in field.choices {
+                let picked = if choice.value.as_str() == value {
+                    " selected"
+                } else {
+                    ""
+                };
+                options.push_str(&format!(
+                    r#"<option value="{}"{}>{}</option>"#,
+                    escape(choice.value.as_str()),
+                    picked,
+                    escape(choice.label)
+                ));
+            }
+            format!(
+                r#"{label}<select id="filter-{name}" name="{name}">{options}</select>"#
             )
         }
     }
@@ -156,6 +219,28 @@ mod tests {
         );
         let optional = Field::cell::<String>("f").optional();
         assert_eq!(value(&optional, None).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn choices() {
+        const COLORS: &[rango_core::model::Choice] = &[
+            rango_core::model::Choice::of("red", "Red"),
+            rango_core::model::Choice::of("blue", "Blue"),
+        ];
+        let field = Field::str("color").choices(COLORS);
+        let html = input(&field, Some(&Value::str("blue")));
+        assert!(html.contains(r#"<select"#));
+        assert!(html.contains(r#"value="red""#));
+        assert!(html.contains(r#"value="blue" selected"#));
+        assert!(html.contains("Red"));
+        assert_eq!(
+            value(&field, Some(&raw("red"))).unwrap(),
+            Value::str("red")
+        );
+        assert!(value(&field, Some(&raw("purple"))).is_err());
+        assert_eq!(shown(&field, Some(&Value::str("red"))), "Red");
+        let filter = filter_input(&field, "red");
+        assert!(filter.contains(r#"value="red" selected"#));
     }
 
     #[test]

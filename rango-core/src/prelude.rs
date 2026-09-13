@@ -6,7 +6,7 @@ pub use crate::error::Error;
 pub use crate::forgery::{Token, cookie, guard, named, token};
 pub use crate::form::{Errors, FieldError, Form, Valid};
 pub use crate::model::{
-    Action, Check, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Pick, Query,
+    Action, Check, Choice, Field, Filter, Key, Link, Mass, Model, Name, Only, Op, Order, Page, Query,
     Repository, Rule, Run, Schema, Sort, Table, Tree, id_column, key, related,
 };
 pub use crate::settings::Settings;

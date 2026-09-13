@@ -18,7 +18,7 @@ pub mod spec;
 pub mod sqlite;
 
 pub use spec::{
-    Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
+    Action, Check, Choice, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Query, Rule,
     Run, Schema, Sort, Table, Tree,
 };
 
@@ -318,6 +318,8 @@ pub enum Widget {
     Date,
     /// Checkbox.
     Check,
+    /// Select from a fixed set of choices.
+    Choice,
 }
 
 /// Sink for typed cell values during serialization.
