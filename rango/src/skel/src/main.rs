@@ -24,7 +24,7 @@ async fn index(
 
 #[rango::main]
 async fn main() -> ExitCode {
-    Rango::serve(env!("CARGO_MANIFEST_DIR"))
+    Rango::new(env!("CARGO_MANIFEST_DIR"))
         .model::<Message>()
         .routes(Routes::new().route("/", get(index)))
         .authentication(|authentication| authentication.signup(true))

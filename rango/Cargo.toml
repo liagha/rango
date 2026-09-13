@@ -19,4 +19,3 @@ rango-admin.workspace = true
 rango-authentication.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-rpassword = "7"

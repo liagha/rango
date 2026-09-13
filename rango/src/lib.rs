@@ -24,7 +24,7 @@ pub struct Rango {
 
 impl Rango {
     /// New app rooted at the given data directory.
-    pub fn serve(dir: impl Into<PathBuf>) -> Self {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
             admin: admin::Admin::new(),
@@ -62,42 +62,21 @@ impl Rango {
         let mut argv = std::env::args().skip(1);
         match argv.next() {
             None => {
-                let db = self.db().await;
-                self.boot(db).await
+                let store = self.db().await;
+                self.boot(store).await
             }
             Some(word) if word == "-h" || word == "--help" => {
                 println!("{}", cli::usage());
                 ExitCode::SUCCESS
             }
-            Some(word) if word == "migrate" || word == "create" => {
-                match cli::parse([word].into_iter().chain(argv)) {
-                    Ok(cli::Command::Create(cli::Create::Project { name })) => {
-                        match cli::project(&name) {
-                            Ok(done) => {
-                                println!("{done}");
-                                ExitCode::SUCCESS
-                            }
-                            Err(fail) => {
-                                eprintln!("{fail}");
-                                ExitCode::from(cli::code(&fail) as u8)
-                            }
-                        }
-                    }
-                    Ok(command) => {
-                        let db = self.db().await;
-                        self.deal(db, schemas, command).await
-                    }
-                    Err(fail) => {
-                        eprintln!("{fail}");
-                        ExitCode::from(cli::code(&fail) as u8)
-                    }
+            Some(word) => match cli::parse([word].into_iter().chain(argv)) {
+                Ok(cli::Command::Project { name }) => finish(cli::project(&name)),
+                Ok(cli::Command::Db(db)) => {
+                    let store = self.db().await;
+                    finish(cli::exec(&store, &schemas, db).await)
                 }
-            }
-            Some(word) => {
-                eprintln!("unknown command {word}");
-                eprintln!("{}", cli::usage());
-                ExitCode::from(2)
-            }
+                Err(fail) => finish(Err(fail)),
+            },
         }
     }
 
@@ -112,24 +91,6 @@ impl Rango {
             Err(fail) => {
                 eprintln!("error: {fail}");
                 std::process::exit(1);
-            }
-        }
-    }
-
-    async fn deal(
-        self,
-        store: Arc<dyn Store>,
-        schemas: Vec<Schema>,
-        command: cli::Command,
-    ) -> ExitCode {
-        match cli::exec(&store, &schemas, command).await {
-            Ok(done) => {
-                println!("{done}");
-                ExitCode::SUCCESS
-            }
-            Err(fail) => {
-                eprintln!("{fail}");
-                ExitCode::from(cli::code(&fail) as u8)
             }
         }
     }
@@ -156,6 +117,19 @@ impl Rango {
                 eprintln!("error: {fail}");
                 ExitCode::FAILURE
             }
+        }
+    }
+}
+
+fn finish(result: Result<String, cli::Fail>) -> ExitCode {
+    match result {
+        Ok(done) => {
+            println!("{done}");
+            ExitCode::SUCCESS
+        }
+        Err(fail) => {
+            eprintln!("{fail}");
+            fail.exit()
         }
     }
 }

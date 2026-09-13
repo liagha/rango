@@ -1,34 +1,34 @@
-use std::sync::Arc;
+use std::{process::ExitCode, sync::Arc};
 
 use rango_core::model::Schema;
 use rango_store::{Store, StoreError};
 
 /// A parsed CLI command.
 pub enum Command {
+    /// A command that runs against the open store.
+    Db(Db),
+    /// Scaffold a new project directory.
+    Project {
+        /// Name of the new project directory.
+        name: String,
+    },
+}
+
+/// A command that runs against the open store.
+pub enum Db {
     /// Apply schema migrations, dropping tables first when `--drop` is given.
     Migrate {
         /// Drop existing tables before migrating.
         drop: bool,
     },
-    /// Create a user or scaffold a project.
-    Create(Create),
-}
-
-/// A resource the CLI can create.
-pub enum Create {
     /// Create a user with the given credentials.
-    User {
+    Create {
         /// Name for the new user.
         username: Option<String>,
         /// Password for the new user.
         password: Option<String>,
         /// Grant superuser (full admin) access.
         superuser: bool,
-    },
-    /// Scaffold a new project.
-    Project {
-        /// Name of the new project directory.
-        name: String,
     },
 }
 
@@ -51,11 +51,10 @@ impl std::fmt::Display for Fail {
 
 impl std::error::Error for Fail {}
 
-/// Exit code for a failure: 2 for usage errors, 1 for runtime errors.
-pub fn code(fail: &Fail) -> i32 {
-    match fail {
-        Fail::Usage(_) => 2,
-        Fail::Error(_) => 1,
+impl Fail {
+    /// Exit code for a failure: 2 for usage errors, 1 for runtime errors.
+    pub fn exit(&self) -> ExitCode {
+        ExitCode::from(if matches!(self, Self::Usage(_)) { 2 } else { 1 })
     }
 }
 
@@ -72,7 +71,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
                     other => return Err(Fail::Usage(format!("unknown argument {other}"))),
                 }
             }
-            Ok(Command::Migrate { drop })
+            Ok(Command::Db(Db::Migrate { drop }))
         }
         Some("create") => match args.next().as_deref() {
             Some("user") => {
@@ -87,7 +86,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
                         other => return Err(Fail::Usage(format!("unknown argument {other}"))),
                     }
                 }
-                Ok(Command::Create(Create::User {
+                Ok(Command::Db(Db::Create {
                     username,
                     password,
                     superuser,
@@ -102,9 +101,9 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
                         return Err(Fail::Usage(format!("unknown argument {arg}")));
                     }
                 }
-                Ok(Command::Create(Create::Project {
+                Ok(Command::Project {
                     name: name.ok_or_else(|| Fail::Usage("create project needs a NAME".into()))?,
-                }))
+                })
             }
             Some(other) => Err(Fail::Usage(format!("unknown create target {other}"))),
             None => Err(Fail::Usage(usage().into())),
@@ -123,18 +122,18 @@ pub fn usage() -> &'static str {
 pub async fn exec(
     store: &Arc<dyn Store>,
     schemas: &[Schema],
-    command: Command,
+    db: Db,
 ) -> Result<String, Fail> {
-    match command {
-        Command::Migrate { drop } => migrate(store, schemas, drop)
+    match db {
+        Db::Migrate { drop } => migrate(store, schemas, drop)
             .await
             .map(|count| format!("migrated {count}"))
             .map_err(|fail| Fail::Error(format!("migrate failed: {fail}"))),
-        Command::Create(Create::User {
+        Db::Create {
             username,
             password,
             superuser,
-        }) => {
+        } => {
             let Some(username) = username else {
                 return Err(Fail::Usage("create user needs --username NAME".into()));
             };
@@ -153,7 +152,6 @@ pub async fn exec(
                 Err(fail) => Err(Fail::Error(fail.to_string())),
             }
         }
-        Command::Create(Create::Project { .. }) => unreachable!("handled before exec"),
     }
 }
 
@@ -240,24 +238,6 @@ fn valid(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-/// Read one line of terminal input.
-pub fn prompt(text: &str) -> String {
-    use std::io::Write;
-    print!("{text}");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    line.trim().to_string()
-}
-
-/// Read a password from the terminal without echoing it.
-pub fn prompt_password() -> String {
-    rpassword::prompt_password("Password: ")
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,18 +250,18 @@ mod tests {
     fn migrate() {
         assert!(matches!(
             parse(args(&["migrate"])).unwrap(),
-            Command::Migrate { drop: false }
+            Command::Db(Db::Migrate { drop: false })
         ));
         assert!(matches!(
             parse(args(&["migrate", "--drop"])).unwrap(),
-            Command::Migrate { drop: true }
+            Command::Db(Db::Migrate { drop: true })
         ));
         assert!(parse(args(&["migrate", "--bogus"])).is_err());
     }
 
     #[test]
     fn create() {
-        let Command::Create(Create::User {
+        let Command::Db(Db::Create {
             username,
             password,
             superuser,
@@ -301,9 +281,7 @@ mod tests {
         assert_eq!(username, Some("u".into()));
         assert_eq!(password, Some("p".into()));
         assert!(superuser);
-        let Command::Create(Create::Project { name }) =
-            parse(args(&["create", "project", "site"])).unwrap()
-        else {
+        let Command::Project { name } = parse(args(&["create", "project", "site"])).unwrap() else {
             panic!("wrong command")
         };
         assert_eq!(name, "site");

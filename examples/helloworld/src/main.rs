@@ -104,7 +104,7 @@ async fn thanks() -> Result<Response, Error> {
 
 #[rango::main]
 async fn main() -> ExitCode {
-    Rango::serve(env!("CARGO_MANIFEST_DIR"))
+    Rango::new(env!("CARGO_MANIFEST_DIR"))
         .model::<Message>()
         .model::<Product>()
         .model::<Category>()
