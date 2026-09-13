@@ -1,3 +1,5 @@
+//! Cross-site request forgery protection.
+
 use axum::{
     body::to_bytes,
     http::{
@@ -12,12 +14,17 @@ use crate::{
     view::{Request, Response},
 };
 
+/// Maximum request body size the guard reads (2 MiB).
 pub const LIMIT: usize = 2 * 1024 * 1024;
 
 const NAME: &str = "forgery";
 
+/// Request-local token the guard attaches to processed requests.
 #[derive(Clone)]
-pub struct Token(pub String);
+pub struct Token(
+    /// Token value.
+    pub String,
+);
 
 fn generate() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -39,10 +46,12 @@ fn signed(token: &str) -> HeaderValue {
     HeaderValue::from_str(&format!("{NAME}={token}; Path=/; HttpOnly; SameSite=Lax")).unwrap()
 }
 
+/// Forgery token value from the `forgery` cookie, if present.
 pub fn cookie(headers: &HeaderMap) -> Option<String> {
     named(headers, NAME)
 }
 
+/// Cookie value of a single named cookie.
 pub fn named(headers: &HeaderMap, name: &str) -> Option<String> {
     let value = headers.get(COOKIE)?.to_str().ok()?;
     value.split(';').map(str::trim).find_map(|part| {
@@ -51,6 +60,7 @@ pub fn named(headers: &HeaderMap, name: &str) -> Option<String> {
     })
 }
 
+/// Token for the request: the extension value, the cookie, or a fresh one.
 pub fn token(req: &Request) -> String {
     if let Some(token) = req.extensions().get::<Token>() {
         return token.0.clone();
@@ -58,6 +68,7 @@ pub fn token(req: &Request) -> String {
     cookie(req.headers()).unwrap_or_else(generate)
 }
 
+/// Middleware that checks the token field on unsafe methods and issues a cookie.
 pub async fn guard(req: Request, next: Next) -> Result<Response, Error> {
     let safe = safe(req.method());
     let (mut parts, body) = req.into_parts();
@@ -88,13 +99,7 @@ pub async fn guard(req: Request, next: Next) -> Result<Response, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::StatusCode,
-        middleware,
-        routing::get,
-        Router,
-    };
+    use axum::{Router, body::Body, http::StatusCode, middleware, routing::get};
     use tower::ServiceExt;
 
     #[test]
@@ -108,10 +113,14 @@ mod tests {
 
     #[test]
     fn tokens() {
-        let mut with_ext = axum::http::Request::<()>::builder().body(Body::empty()).unwrap();
+        let mut with_ext = axum::http::Request::<()>::builder()
+            .body(Body::empty())
+            .unwrap();
         with_ext.extensions_mut().insert(Token("abc".into()));
         assert_eq!(token(&with_ext), "abc");
-        let req = axum::http::Request::<()>::builder().body(Body::empty()).unwrap();
+        let req = axum::http::Request::<()>::builder()
+            .body(Body::empty())
+            .unwrap();
         assert_ne!(token(&req), token(&req));
     }
 
@@ -134,12 +143,16 @@ mod tests {
     }
 
     async fn body_of(response: Response) -> String {
-        let bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     fn app() -> Router {
-        Router::new().route("/", get(probe)).layer(middleware::from_fn(guard))
+        Router::new()
+            .route("/", get(probe))
+            .layer(middleware::from_fn(guard))
     }
 
     #[tokio::test]

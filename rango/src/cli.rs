@@ -3,25 +3,41 @@ use std::sync::Arc;
 use rango_core::model::Schema;
 use rango_store::{Store, StoreError};
 
+/// A parsed CLI command.
 pub enum Command {
-    Migrate { drop: bool },
+    /// Apply schema migrations, dropping tables first when `--drop` is given.
+    Migrate {
+        /// Drop existing tables before migrating.
+        drop: bool,
+    },
+    /// Create a user or scaffold a project.
     Create(Create),
 }
 
+/// A resource the CLI can create.
 pub enum Create {
+    /// Create a user with the given credentials.
     User {
+        /// Name for the new user.
         username: Option<String>,
+        /// Password for the new user.
         password: Option<String>,
+        /// Grant superuser (full admin) access.
         superuser: bool,
     },
+    /// Scaffold a new project.
     Project {
+        /// Name of the new project directory.
         name: String,
     },
 }
 
+/// A CLI failure: a usage error or an execution error.
 #[derive(Debug)]
 pub enum Fail {
+    /// Malformed command-line invocation.
     Usage(String),
+    /// Failure while executing a command.
     Error(String),
 }
 
@@ -35,6 +51,7 @@ impl std::fmt::Display for Fail {
 
 impl std::error::Error for Fail {}
 
+/// Exit code for a failure: 2 for usage errors, 1 for runtime errors.
 pub fn code(fail: &Fail) -> i32 {
     match fail {
         Fail::Usage(_) => 2,
@@ -42,6 +59,7 @@ pub fn code(fail: &Fail) -> i32 {
     }
 }
 
+/// Parse the command line into a command.
 #[allow(clippy::while_let_on_iterator)]
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
     let mut args = args.peekable();
@@ -96,10 +114,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, Fail> {
     }
 }
 
+/// Text shown by `--help` and on unknown commands.
 pub fn usage() -> &'static str {
     "usage: app [command]\ncommands:\n  migrate [--drop]\n  create user [--username NAME] [--password PASS] [--super]\n  create project NAME"
 }
 
+/// Run a parsed command against the store.
 pub async fn exec(
     store: &Arc<dyn Store>,
     schemas: &[Schema],
@@ -137,6 +157,7 @@ pub async fn exec(
     }
 }
 
+/// Apply schema migrations to the store, one schema at a time.
 pub async fn migrate(
     store: &Arc<dyn Store>,
     schemas: &[Schema],
@@ -149,6 +170,7 @@ pub async fn migrate(
     Ok(done)
 }
 
+/// Scaffold a new project in the current directory.
 pub fn project(name: &str) -> Result<String, Fail> {
     if !valid(name) {
         return Err(Fail::Usage(format!(
@@ -207,6 +229,7 @@ fn valid(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+/// Read one line of terminal input.
 pub fn prompt(text: &str) -> String {
     use std::io::Write;
     print!("{text}");
@@ -216,6 +239,7 @@ pub fn prompt(text: &str) -> String {
     line.trim().to_string()
 }
 
+/// Read a password from the terminal without echoing it.
 pub fn prompt_password() -> String {
     rpassword::prompt_password("Password: ")
         .unwrap_or_default()

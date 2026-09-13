@@ -85,58 +85,58 @@ pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
 }
 
 #[cfg(test)]
-    mod tests {
-        use super::*;
-        use rango_core::{
-            chrono::{TimeZone, Utc},
-            model::Table,
-            StoreError, Storable,
-        };
+mod tests {
+    use super::*;
+    use rango_core::{
+        Storable, StoreError,
+        chrono::{TimeZone, Utc},
+        model::Table,
+    };
 
-        #[derive(Clone)]
-        struct Thread {
-            id: i64,
-            title: String,
-        }
+    #[derive(Clone)]
+    struct Thread {
+        id: i64,
+        title: String,
+    }
 
-        impl Model for Thread {
-            fn table() -> Table {
-                Table("threads")
-            }
-
-            fn fields() -> Vec<Field> {
-                vec![Field::id(), Field::str("title"), Field::many("tags")]
-            }
-
-            fn write(&self, w: &mut dyn rango_core::Writer) {
-                Storable::put(&self.title, w);
-            }
-
-            fn read(r: &mut dyn rango_core::Reader) -> Result<Self, StoreError> {
-                Ok(Self {
-                    id: Storable::take(r)?,
-                    title: Storable::take(r)?,
-                })
-            }
-
-            fn write_id(&self, w: &mut dyn rango_core::Writer) {
-                Storable::put(&self.id, w);
-            }
-
-            fn read_id(&mut self, r: &mut dyn rango_core::Reader) -> Result<(), StoreError> {
-                self.id = Storable::take(r)?;
-                Ok(())
-            }
+    impl Model for Thread {
+        fn table() -> Table {
+            Table("threads")
         }
 
         fn fields() -> Vec<Field> {
-            vec![
-                Field::id(),
-                Field::str("title"),
-                Field::many("tags"),
-                Field::str("extra"),
-            ]
+            vec![Field::id(), Field::str("title"), Field::many("tags")]
         }
+
+        fn write(&self, w: &mut dyn rango_core::Writer) {
+            Storable::put(&self.title, w);
+        }
+
+        fn read(r: &mut dyn rango_core::Reader) -> Result<Self, StoreError> {
+            Ok(Self {
+                id: Storable::take(r)?,
+                title: Storable::take(r)?,
+            })
+        }
+
+        fn write_id(&self, w: &mut dyn rango_core::Writer) {
+            Storable::put(&self.id, w);
+        }
+
+        fn read_id(&mut self, r: &mut dyn rango_core::Reader) -> Result<(), StoreError> {
+            self.id = Storable::take(r)?;
+            Ok(())
+        }
+    }
+
+    fn fields() -> Vec<Field> {
+        vec![
+            Field::id(),
+            Field::str("title"),
+            Field::many("tags"),
+            Field::str("extra"),
+        ]
+    }
 
     #[test]
     fn texts() {
@@ -146,7 +146,12 @@ pub(crate) fn align(values: &[Value], fields: &[Field]) -> Vec<Value> {
         assert_eq!(text(Some(&Value::int(7))), "7");
         assert_eq!(text(Some(&Value::bool(true))), "true");
         assert_eq!(text(Some(&Value::Float(1.5))), "1.5");
-        assert_eq!(text(Some(&Value::Decimal(rango_core::decimal::Decimal::new(12, 1)))), "1.2");
+        assert_eq!(
+            text(Some(&Value::Decimal(rango_core::decimal::Decimal::new(
+                12, 1
+            )))),
+            "1.2"
+        );
         let at = Utc.with_ymd_and_hms(2026, 9, 9, 12, 30, 0).unwrap();
         assert_eq!(text(Some(&Value::datetime(at))), "2026-09-09 12:30");
     }

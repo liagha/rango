@@ -1,7 +1,7 @@
 use rango_core::model::Field;
 use rango_core::{
-    store::{Cells, Gather, Value, Widget},
     Error,
+    store::{Cells, Gather, Value, Widget},
 };
 
 use super::row::text;
@@ -21,11 +21,7 @@ pub(crate) fn input(field: &Field, value: Option<&Value>) -> String {
 }
 
 pub(crate) fn input_raw(field: &Field, raw: &str) -> String {
-    control(
-        field,
-        raw,
-        field.load() == Widget::Check && raw == "on",
-    )
+    control(field, raw, field.load() == Widget::Check && raw == "on")
 }
 
 pub(crate) fn locked(field: &Field, value: Option<&Value>) -> String {
@@ -149,10 +145,7 @@ mod tests {
             Value::str("hi")
         );
         let int_field = Field::cell::<i64>("f");
-        assert_eq!(
-            value(&int_field, Some(&raw("3"))).unwrap(),
-            Value::int(3)
-        );
+        assert_eq!(value(&int_field, Some(&raw("3"))).unwrap(), Value::int(3));
         assert!(value(&int_field, Some(&raw("x"))).is_err());
         assert!(value(&int_field, None).is_err());
         let check_field = Field::check("f");

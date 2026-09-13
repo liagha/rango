@@ -1,3 +1,5 @@
+//! Application assembly and serving.
+
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use axum::{Router, extract::Extension};
@@ -13,6 +15,7 @@ use tower_http::{catch_panic::CatchPanicLayer, services::ServeDir, trace::TraceL
 use crate::forgery;
 use crate::{error::Error, settings::Settings, store::Store, urls::Routes};
 
+/// Rango application: settings, store, routes, and lifecycle.
 pub struct App {
     settings: Settings,
     store: Arc<dyn Store>,
@@ -23,6 +26,7 @@ pub struct App {
 type Ready = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 impl App {
+    /// New app with the given settings and store.
     pub fn new(settings: Settings, store: Arc<dyn Store>) -> Self {
         Self {
             settings,
@@ -32,22 +36,26 @@ impl App {
         }
     }
 
+    /// Merge routes into the root router.
     pub fn urls(mut self, routes: Routes) -> Self {
         self.router = self.router.merge(routes.into_router());
         self
     }
 
+    /// Nest routes under the given URL prefix.
     pub fn mount(mut self, prefix: &str, routes: Routes) -> Self {
         self.router = self.router.nest(prefix, routes.into_router());
         self
     }
 
+    /// Serve settings-assets as static files under `/assets`.
     pub fn mount_static(mut self) -> Self {
         let dir = self.settings.assets.clone();
         self.router = self.router.nest_service("/assets", ServeDir::new(dir));
         self
     }
 
+    /// Run the given closure as a startup hook before serving starts.
     pub fn ready<F, Fut>(mut self, ready: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -76,6 +84,7 @@ impl App {
         router
     }
 
+    /// Bind and serve the app until it shuts down.
     pub async fn run(mut self) -> Result<(), std::io::Error> {
         if self.settings.secret.is_none() {
             return Err(std::io::Error::other("set a secret before serving"));

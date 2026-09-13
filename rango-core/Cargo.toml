@@ -3,6 +3,11 @@ name = "rango-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Core of the Rango web framework: models, routing, views, forms, and the request pipeline"
+keywords = ["web", "framework", "routing", "models"]
+categories = ["web-programming"]
 
 [lib]
 name = "rango_core"

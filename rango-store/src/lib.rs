@@ -1,9 +1,21 @@
-pub mod spec;
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
+//! Typed, transaction-safe storage for Rango over SQLite and PostgreSQL.
+//!
+//! The [`Store`] trait is the database face: typed [`Value`]s in, typed [`Row`]s
+//! out. Transactions come from [`Store::deal`] and [`Store::settle`]. A
+//! [`Schema`] describes a table; the `spec` module defines its queries and
+//! field rules. SQLite is the default backend; enable the `postgres` feature
+//! for PostgreSQL.
+#![warn(missing_docs)]
+
+mod engine;
+/// PostgreSQL backend behind the `postgres` feature.
 #[cfg(feature = "postgres")]
 pub mod postgres;
-mod engine;
+/// Query and schema specification types shared by all backends.
+pub mod spec;
+/// SQLite backend, enabled by default.
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 pub use spec::{
     Action, Check, Field, Filter, Key, Link, Mass, Name, Only, Op, Order, Page, Pick, Query, Rule,
@@ -16,14 +28,22 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
+/// A single typed database value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// SQL NULL.
     Null,
+    /// Signed 64-bit integer.
     Int(i64),
+    /// Double-precision float.
     Float(f64),
+    /// UTF-8 string.
     Str(String),
+    /// Boolean.
     Bool(bool),
+    /// UTC timestamp.
     DateTime(DateTime<Utc>),
+    /// Exact decimal.
     Decimal(Decimal),
 }
 
@@ -45,26 +65,32 @@ impl Serialize for Value {
 }
 
 impl Value {
+    /// Shorthand for [`Value::Str`] from anything `Into<String>`.
     pub fn str(s: impl Into<String>) -> Self {
         Self::Str(s.into())
     }
 
+    /// Shorthand for [`Value::Int`].
     pub fn int(v: i64) -> Self {
         Self::Int(v)
     }
 
+    /// Shorthand for [`Value::Float`].
     pub fn float(v: f64) -> Self {
         Self::Float(v)
     }
 
+    /// Shorthand for [`Value::Bool`].
     pub fn bool(v: bool) -> Self {
         Self::Bool(v)
     }
 
+    /// Shorthand for [`Value::DateTime`].
     pub fn datetime(at: DateTime<Utc>) -> Self {
         Self::DateTime(at)
     }
 
+    /// Shorthand for [`Value::Decimal`].
     pub fn decimal(v: Decimal) -> Self {
         Self::Decimal(v)
     }
@@ -85,29 +111,40 @@ impl From<&Option<String>> for Value {
     }
 }
 
+/// How a column's cells map to [`Value`]s when read back.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum ColumnKind {
+    /// Integer affinity ([`Value::Int`]).
     Integer,
+    /// Floating-point affinity ([`Value::Float`]).
     Real,
+    /// Text affinity ([`Value::Str`]).
     Text,
 }
 
+/// A single column: name plus affinity kind.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Column {
+    /// Column name.
     pub name: String,
+    /// Value affinity of the column.
     pub kind: ColumnKind,
 }
 
+/// One fetched row, cells aligned with the query's columns.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Row {
+    /// Cell values, one per selected column.
     pub values: Vec<Value>,
 }
 
 impl Row {
+    /// Cell at index `i`, if present.
     pub fn get(&self, i: usize) -> Option<&Value> {
         self.values.get(i)
     }
 
+    /// Cell `i` as `i64`, or [`StoreError::Value`].
     pub fn int(&self, i: usize) -> Result<i64, StoreError> {
         match self.values.get(i) {
             Some(Value::Int(value)) => Ok(*value),
@@ -115,6 +152,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `f64`, or [`StoreError::Value`].
     pub fn float(&self, i: usize) -> Result<f64, StoreError> {
         match self.values.get(i) {
             Some(Value::Float(value)) => Ok(*value),
@@ -122,6 +160,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `String`, or [`StoreError::Value`].
     pub fn str(&self, i: usize) -> Result<String, StoreError> {
         match self.values.get(i) {
             Some(Value::Str(value)) => Ok(value.clone()),
@@ -129,6 +168,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `Option<String>`, `None` when null or not text.
     pub fn opt_str(&self, i: usize) -> Option<String> {
         match self.values.get(i) {
             Some(Value::Str(value)) => Some(value.clone()),
@@ -136,6 +176,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `bool` (integers count as truthy), or [`StoreError::Value`].
     pub fn bool(&self, i: usize) -> Result<bool, StoreError> {
         match self.values.get(i) {
             Some(Value::Bool(value)) => Ok(*value),
@@ -144,6 +185,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `DateTime<Utc>` (accepts int timestamps and RFC 3339 text), or [`StoreError::Value`].
     pub fn datetime(&self, i: usize) -> Result<DateTime<Utc>, StoreError> {
         let bad = || StoreError::Value(format!("row column {i} not datetime"));
         match self.values.get(i) {
@@ -154,6 +196,7 @@ impl Row {
         }
     }
 
+    /// Cell `i` as `Decimal` (accepts text), or [`StoreError::Value`].
     pub fn decimal(&self, i: usize) -> Result<Decimal, StoreError> {
         let bad = || StoreError::Value(format!("row column {i} not decimal"));
         match self.values.get(i) {
@@ -163,19 +206,27 @@ impl Row {
         }
     }
 
+    /// A [`Reader`] over the row's cells.
     pub fn cells(&self) -> Cells<'_> {
         Cells::new(&self.values)
     }
 }
 
+/// A batch of fetched rows.
 pub type Rows = Vec<Row>;
 
+/// Errors surfaced by the store, backends, and value conversion.
 #[derive(Debug)]
 pub enum StoreError {
+    /// SQL or driver error.
     Sql(String),
+    /// Invalid value, column, or key conversion.
     Value(String),
+    /// Streaming or channel error.
     Channel(String),
+    /// I/O error.
     Io(String),
+    /// Operation not supported by the backend.
     Unsupported(String),
 }
 
@@ -193,41 +244,66 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// UI hint for how a field is rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Widget {
+    /// Plain text input.
     Text,
+    /// Integer input.
     Int,
+    /// Float input.
     Flt,
+    /// Money input.
     Money,
+    /// Date input.
     Date,
+    /// Checkbox.
     Check,
 }
 
+/// Sink for typed cell values during serialization.
 pub trait Writer {
+    /// Writes a null cell.
     fn nothing(&mut self);
+    /// Writes an integer cell.
     fn int(&mut self, value: i64);
+    /// Writes a float cell.
     fn flt(&mut self, value: f64);
+    /// Writes a string cell.
     fn str(&mut self, value: &str);
 }
 
+/// Source of typed cell values during deserialization.
 pub trait Reader {
+    /// Reads a null cell; `true` when the next cell is null.
     fn nothing(&mut self) -> bool;
+    /// Reads the next cell as `i64`, or [`StoreError::Value`].
     fn int(&mut self) -> Result<i64, StoreError>;
+    /// Reads the next cell as `f64`, or [`StoreError::Value`].
     fn flt(&mut self) -> Result<f64, StoreError>;
+    /// Reads the next cell as `String`, or [`StoreError::Value`].
     fn str(&mut self) -> Result<String, StoreError>;
 }
 
+/// A type that can be stored in a single column.
 pub trait Storable: Send + Sync + 'static {
+    /// Serializes `self` into a [`Writer`].
     fn put(&self, w: &mut dyn Writer);
+    /// Deserializes a `Self` from a [`Reader`].
     fn take(r: &mut dyn Reader) -> Result<Self, StoreError>
     where
         Self: Sized;
+    /// SQL column type for this value.
     fn dtype() -> &'static str;
 }
 
+/// Human presentation of a stored type: widget, parsing, and text.
 pub trait Show: Sized {
+    /// Input widget for this type.
     fn widget() -> Widget;
+    /// Parses raw user input into a `Self`.
     fn parse(raw: &str) -> Result<Self, StoreError>;
+    /// Renders this value as display text.
     fn text(&self) -> String;
 }
 
@@ -361,8 +437,7 @@ impl Storable for Decimal {
     }
 
     fn take(r: &mut dyn Reader) -> Result<Self, StoreError> {
-        Decimal::from_str(&r.str()?)
-            .map_err(|_| StoreError::Value("bad decimal".into()))
+        Decimal::from_str(&r.str()?).map_err(|_| StoreError::Value("bad decimal".into()))
     }
 
     fn dtype() -> &'static str {
@@ -503,15 +578,18 @@ impl<T: Storable> Storable for Option<T> {
     }
 }
 
+/// [`Writer`] that captures a single value.
 pub struct Gather {
     value: Value,
 }
 
 impl Gather {
+    /// An empty gather starts at [`Value::Null`].
     pub fn new() -> Self {
         Self { value: Value::Null }
     }
 
+    /// The captured value.
     pub fn value(self) -> Value {
         self.value
     }
@@ -541,15 +619,18 @@ impl Writer for Gather {
     }
 }
 
+/// [`Writer`] that collects every written value in order.
 pub struct Slots {
     values: Vec<Value>,
 }
 
 impl Slots {
+    /// An empty slot list.
     pub fn new() -> Self {
         Self { values: Vec::new() }
     }
 
+    /// The collected values.
     pub fn values(self) -> Vec<Value> {
         self.values
     }
@@ -579,12 +660,14 @@ impl Writer for Slots {
     }
 }
 
+/// [`Reader`] over a slice of values; the cursor advances as cells are read.
 pub struct Cells<'a> {
     values: &'a [Value],
     at: usize,
 }
 
 impl<'a> Cells<'a> {
+    /// A cursor over `values` starting at the first cell.
     pub fn new(values: &'a [Value]) -> Self {
         Self { values, at: 0 }
     }
@@ -666,15 +749,19 @@ impl Reader for Cells<'_> {
     }
 }
 
+/// A boxed, `Send`, `'a`-bounded future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// A database backend: SQL and typed schema operations over a connection.
 pub trait Store: Send + Sync + 'static {
+    /// Runs `sql` with `params`, returning rows affected.
     fn execute<'a>(
         &'a self,
         sql: &'a str,
         params: &'a [Value],
     ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
+    /// Runs `sql` with `params`, decoding rows per `kinds`.
     fn fetch<'a>(
         &'a self,
         sql: &'a str,
@@ -682,31 +769,37 @@ pub trait Store: Send + Sync + 'static {
         kinds: &'a [ColumnKind],
     ) -> BoxFuture<'a, Result<Rows, StoreError>>;
 
+    /// Introspects the columns of `table`.
     fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
         let _ = table;
         Box::pin(async { Err(StoreError::Unsupported("columns".into())) })
     }
 
+    /// Fetches the rows of `schema` matching `query`.
     fn scan_query<'a>(
         &'a self,
         schema: &'a Schema,
         query: &'a Query,
     ) -> BoxFuture<'a, Result<Rows, StoreError>>;
 
+    /// Counts the rows of `schema` matching `query`.
     fn total_query<'a>(
         &'a self,
         schema: &'a Schema,
         query: &'a Query,
     ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
+    /// Creates `schema`'s table if absent.
     fn define<'a>(&'a self, schema: &'a Schema) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    /// Inserts a batch of `schema` rows, returning each new row's key.
     fn create<'a>(
         &'a self,
         schema: &'a Schema,
         batch: &'a [Vec<(Name, Value)>],
     ) -> BoxFuture<'a, Result<Vec<Key>, StoreError>>;
 
+    /// Overwrites `key`'s row of `schema` with `cells`.
     fn replace<'a>(
         &'a self,
         schema: &'a Schema,
@@ -714,32 +807,38 @@ pub trait Store: Send + Sync + 'static {
         cells: &'a [(Name, Value)],
     ) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    /// Inserts a `schema` batch, overwriting any matching keys, returning rows touched.
     fn upsert<'a>(
         &'a self,
         schema: &'a Schema,
         batch: &'a [Vec<(Name, Value)>],
     ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
+    /// Deletes `key`'s row of `schema`.
     fn remove<'a>(
         &'a self,
         schema: &'a Schema,
         key: &'a Key,
     ) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    /// Migrates `schema`'s table to the latest definition, returning statements run.
     fn evolve<'a>(
         &'a self,
         schema: &'a Schema,
         drop: bool,
     ) -> BoxFuture<'a, Result<usize, StoreError>>;
 
+    /// Aggregates `schema` rows matching `query` per `query.mass`.
     fn mass<'a>(
         &'a self,
         schema: &'a Schema,
         query: &'a Query,
     ) -> BoxFuture<'a, Result<Value, StoreError>>;
 
+    /// Last autoincrement id inserted into `table`.
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 
+    /// Raw single-row insert into `table` returning its id.
     fn insert<'a>(
         &'a self,
         table: &'a str,
@@ -759,10 +858,12 @@ pub trait Store: Send + Sync + 'static {
         })
     }
 
+    /// Opens a transaction as an independent [`Store`].
     fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
         Box::pin(async { Err(StoreError::Unsupported("deal".into())) })
     }
 
+    /// Commits or rolls back the transaction from [`Store::deal`].
     fn settle(self: Arc<Self>, commit: bool) -> BoxFuture<'static, Result<(), StoreError>> {
         Box::pin(async move {
             let _ = commit;
@@ -795,7 +896,10 @@ mod tests {
         assert_eq!(serde_json::to_string(&Value::Null).unwrap(), "null");
         assert_eq!(serde_json::to_string(&Value::Int(12)).unwrap(), "12");
         assert_eq!(serde_json::to_string(&Value::Float(1.5)).unwrap(), "1.5");
-        assert_eq!(serde_json::to_string(&Value::Str("hi".into())).unwrap(), "\"hi\"");
+        assert_eq!(
+            serde_json::to_string(&Value::Str("hi".into())).unwrap(),
+            "\"hi\""
+        );
         assert_eq!(serde_json::to_string(&Value::Bool(true)).unwrap(), "true");
         let at = DateTime::from_timestamp(0, 0).unwrap();
         assert_eq!(
@@ -822,6 +926,9 @@ mod tests {
         let row = Row {
             values: vec![Value::Int(1), Value::Null],
         };
-        assert_eq!(serde_json::to_string(&row).unwrap(), "{\"values\":[1,null]}");
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            "{\"values\":[1,null]}"
+        );
     }
 }

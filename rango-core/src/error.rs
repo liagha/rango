@@ -1,3 +1,5 @@
+//! Error type for the request pipeline.
+
 use std::fmt;
 
 use axum::{
@@ -5,16 +7,23 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+/// Request pipeline error, convertible into an HTTP response.
 #[derive(Debug)]
 pub enum Error {
+    /// Invalid request with the reason in the message.
     BadRequest(String),
+    /// Request denied by a guard.
     Forbidden,
+    /// No route or resource matched.
     NotFound,
+    /// Server-side failure with the cause in the message.
     Server(String),
+    /// Template rendering failure with the cause in the message.
     Render(String),
 }
 
 impl Error {
+    /// HTTP status for this error.
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,

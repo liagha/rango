@@ -1,11 +1,15 @@
+//! Form extraction and validation.
+
 pub use axum::extract::Form;
 
+/// Validation message for a single field.
 pub struct FieldError {
     field: String,
     message: String,
 }
 
 impl FieldError {
+    /// New error for the given field with the given message.
     pub fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             field: field.into(),
@@ -14,17 +18,21 @@ impl FieldError {
     }
 }
 
+/// Validation errors keyed by field name.
 pub struct Errors(Vec<FieldError>);
 
 impl Errors {
+    /// Empty error set.
     pub fn new() -> Self {
         Self(Vec::new())
     }
 
+    /// Add an error for the given field.
     pub fn push(&mut self, field: impl Into<String>, message: impl Into<String>) {
         self.0.push(FieldError::new(field, message));
     }
 
+    /// First message for the given field, or empty if none.
     pub fn message(&self, field: &str) -> &str {
         self.0
             .iter()
@@ -33,6 +41,7 @@ impl Errors {
             .unwrap_or("")
     }
 
+    /// True when the form has no errors.
     pub fn valid(&self) -> bool {
         self.0.is_empty()
     }
@@ -44,7 +53,9 @@ impl Default for Errors {
     }
 }
 
+/// Types that report their validation errors.
 pub trait Valid {
+    /// Validation errors for this value.
     fn errors(&self) -> Errors;
 }
 

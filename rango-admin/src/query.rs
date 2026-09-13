@@ -131,11 +131,7 @@ mod tests {
     use super::*;
 
     fn fields() -> Vec<Field> {
-        vec![
-            Field::id(),
-            Field::str("name"),
-            Field::cell::<i64>("age"),
-        ]
+        vec![Field::id(), Field::str("name"), Field::cell::<i64>("age")]
     }
 
     #[test]

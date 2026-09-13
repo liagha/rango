@@ -1,12 +1,18 @@
+//! Facade crate of the rango web framework. Re-exports the model, routing,
+//! store, admin, and authentication sub-crates behind a single import.
+#![warn(missing_docs)]
+
 pub use rango_admin as admin;
 pub use rango_authentication as authentication;
 pub use rango_core::*;
 pub use rango_store as store;
 
+/// Command-line interface for migrations, users, and project scaffolding.
 pub mod cli;
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
+/// Rango application builder, configured then served or run as a CLI.
 pub struct Rango {
     dir: PathBuf,
     admin: admin::Admin,
@@ -17,6 +23,7 @@ pub struct Rango {
 }
 
 impl Rango {
+    /// New app rooted at the given data directory.
     pub fn serve(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
@@ -26,16 +33,19 @@ impl Rango {
         }
     }
 
+    /// Register a data model with the admin panel.
     pub fn model<M: Model>(mut self) -> Self {
         self.admin = self.admin.model::<M>();
         self
     }
 
+    /// Add routes to the app.
     pub fn routes(mut self, routes: Routes) -> Self {
         self.routes = self.routes.merge(routes);
         self
     }
 
+    /// Configure the authentication stack before boot.
     pub fn authentication<F>(mut self, f: F) -> Self
     where
         F: FnOnce(authentication::Authentication) -> authentication::Authentication
@@ -46,6 +56,7 @@ impl Rango {
         self
     }
 
+    /// Serve the app, or run a CLI command when arguments are given.
     pub async fn run(self) -> ExitCode {
         let schemas = schemas(&self.admin);
         let mut argv = std::env::args().skip(1);

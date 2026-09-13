@@ -1,3 +1,12 @@
+//! Authentication and sessions for Rango: signup, login, users, and auth views.
+//!
+//! The [`Authentication`] struct configures session cookies, login and expiry
+//! rules, and binds account state to requests via axum middleware and the
+//! [`Current`] extractor. Sign-in, sign-up, logout and password-change pages
+//! become available by enabling the `views` feature, which gates the bundled
+//! [`User`] registration and login helpers.
+#![warn(missing_docs)]
+
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -21,6 +30,7 @@ mod views;
 use session::{Attempts, Claim, claim, cookie, login_url, verify};
 pub use user::User;
 
+/// Session cookie and route-guard configuration for signup and login.
 #[derive(Clone)]
 pub struct Authentication {
     secret: String,
@@ -31,7 +41,12 @@ pub struct Authentication {
     attempts: Arc<Mutex<Attempts>>,
 }
 
+/// Authentication configuration shared across requests.
+///
+/// Holds the signing secret, cookie and login-path settings, and binds a
+/// signed session cookie to the current [`User`] when attached to a route.
 impl Authentication {
+    /// Creates a new config with the given signing secret and defaults.
     pub fn new(secret: impl Into<String>) -> Self {
         Self {
             secret: secret.into(),
@@ -43,26 +58,31 @@ impl Authentication {
         }
     }
 
+    /// Sets the login path redirect target.
     pub fn login(mut self, path: impl Into<String>) -> Self {
         self.login = path.into();
         self
     }
 
+    /// Sets the session cookie name.
     pub fn cookie(mut self, name: impl Into<String>) -> Self {
         self.cookie = name.into();
         self
     }
 
+    /// Sets the session lifetime in days.
     pub fn expiry(mut self, days: i64) -> Self {
         self.days = days;
         self
     }
 
+    /// Enables the registration page.
     pub fn signup(mut self, on: bool) -> Self {
         self.signup = on;
         self
     }
 
+    /// Sets the failed-login attempts before lockout.
     pub fn attempts(self, max: u32) -> Self {
         if let Ok(mut attempts) = self.attempts.lock() {
             attempts.max = max;
@@ -70,6 +90,7 @@ impl Authentication {
         self
     }
 
+    /// Sets the lockout window in minutes.
     pub fn lockout(self, minutes: i64) -> Self {
         if let Ok(mut attempts) = self.attempts.lock() {
             attempts.minutes = minutes;
@@ -77,14 +98,17 @@ impl Authentication {
         self
     }
 
+    /// Attaches session loading to the given routes.
     pub fn session(&self, routes: Routes) -> Routes {
         routes.layer(from_fn_with_state(self.clone(), Self::load))
     }
 
+    /// Guards the given routes, redirecting to the login page when unsigned.
     pub fn require_login(&self, routes: Routes) -> Routes {
         routes.layer(from_fn_with_state(self.clone(), Self::deny))
     }
 
+    /// Guards the given routes, allowing only superusers.
     pub fn require_superuser(&self, routes: Routes) -> Routes {
         routes.layer(from_fn_with_state(self.clone(), Self::deny_super))
     }
@@ -151,6 +175,10 @@ impl Authentication {
 }
 
 #[derive(Clone)]
+/// The currently signed-in user carried in request extensions.
+///
+/// `None` when no valid session cookie was provided. Extractable from any
+/// handler once the session middleware has run.
 pub struct Current(pub Option<User>);
 
 impl FromRequestParts<()> for Current {

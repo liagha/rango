@@ -1,3 +1,8 @@
+//! Procedural macros for Rango: the `Model` derive that turns a struct into a stored row, plus the
+//! `form`, `input`, `template`, and `main` attribute macros that wire serde, Askama, and tokio.
+
+#![warn(missing_docs)]
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, ExprLit, Fields, ItemFn, LitStr};
@@ -8,27 +13,34 @@ fn with_serde(mut input: DeriveInput, default: bool) -> TokenStream {
     } else {
         quote!(rango::prelude::Deserialize)
     };
-    input
-        .attrs
-        .push(syn::parse_quote!(#[derive(#derives)]));
+    input.attrs.push(syn::parse_quote!(#[derive(#derives)]));
     input
         .attrs
         .push(syn::parse_quote!(#[serde(crate = "rango::serde")]));
     quote!(#input).into()
 }
 
+/// Derives `Deserialize` and `Default` for a form struct, using `rango::serde`.
+///
+/// Usage: `#[rango::form]` on a struct.
 #[proc_macro_attribute]
 pub fn form(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(item as DeriveInput);
     with_serde(input, true)
 }
 
+/// Derives only `Deserialize` for an input struct, using `rango::serde`.
+///
+/// Usage: `#[rango::input]` on a struct.
 #[proc_macro_attribute]
 pub fn input(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(item as DeriveInput);
     with_serde(input, false)
 }
 
+/// Runs an `async fn main` on a multi-threaded tokio runtime with all features enabled.
+///
+/// Usage: `#[rango::main]` on `async fn main() -> ExitCode`.
 #[proc_macro_attribute]
 pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = syn::parse_macro_input!(item as ItemFn);
@@ -54,6 +66,9 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// Derives `Template` via Askama, forwarding the attribute arguments unchanged.
+///
+/// Usage: `#[rango::template(path = "index.html")]`.
 #[proc_macro_attribute]
 pub fn template(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr: proc_macro2::TokenStream = attr.into();
@@ -67,6 +82,12 @@ pub fn template(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote!(#input).into()
 }
 
+/// Implements `Model` for a struct, mapping each field to a column.
+///
+/// Type-level `#[model(table = "messages", actions = "duplicate")]` sets the table name
+/// (defaults to the lowercased type name plus `s`) and lists row-action functions.
+/// Field attributes: `#[key]`, `#[references("table.column")]`, `#[via("through.mine.theirs")]`,
+/// `#[default(value)]`.
 #[proc_macro_derive(Model, attributes(model, key, references, via, default))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);

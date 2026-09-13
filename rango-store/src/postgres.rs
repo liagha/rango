@@ -5,6 +5,7 @@ use sea_orm::{Database, DbBackend};
 use crate::engine::{Dialect, Engine, sql_err};
 use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
+/// PostgreSQL backend dialect.
 #[derive(Clone)]
 pub struct Postgres;
 
@@ -95,6 +96,7 @@ impl Dialect for Postgres {
     }
 }
 
+/// Connects to a PostgreSQL database at `url` (e.g. `postgres://...`) as a [`Store`].
 pub async fn connect(url: &str) -> Result<Arc<dyn Store>, StoreError> {
     let conn = Database::connect(url).await.map_err(sql_err)?;
     Ok(Arc::new(Engine::new(Postgres, conn)))
@@ -163,9 +165,9 @@ mod tests {
         let schema = Schema {
             table: Table("fw"),
             fields: vec![
-Field::id(),
-        Field::str("name"),
-        Field::cell::<i64>("age").optional(),
+                Field::id(),
+                Field::str("name"),
+                Field::cell::<i64>("age").optional(),
             ],
             rules: Vec::new(),
         };
@@ -212,20 +214,33 @@ Field::id(),
                 .unwrap(),
             2
         );
-        assert_eq!(db.mass(&schema, &mass(Mass::Count)).await.unwrap(), Value::int(3));
         assert_eq!(
-            db.mass(&schema, &mass(Mass::Sum(Name("age")))).await.unwrap(),
+            db.mass(&schema, &mass(Mass::Count)).await.unwrap(),
+            Value::int(3)
+        );
+        assert_eq!(
+            db.mass(&schema, &mass(Mass::Sum(Name("age"))))
+                .await
+                .unwrap(),
             Value::int(101)
         );
         assert_eq!(
-            db.mass(&schema, &mass(Mass::Low(Name("age")))).await.unwrap(),
+            db.mass(&schema, &mass(Mass::Low(Name("age"))))
+                .await
+                .unwrap(),
             Value::int(30)
         );
         assert_eq!(
-            db.mass(&schema, &mass(Mass::High(Name("age")))).await.unwrap(),
+            db.mass(&schema, &mass(Mass::High(Name("age"))))
+                .await
+                .unwrap(),
             Value::int(40)
         );
-        match db.mass(&schema, &mass(Mass::Mean(Name("age")))).await.unwrap() {
+        match db
+            .mass(&schema, &mass(Mass::Mean(Name("age"))))
+            .await
+            .unwrap()
+        {
             Value::Float(mean) => assert!((mean - 101.0 / 3.0).abs() < 0.001),
             _ => panic!("not a mean"),
         }
@@ -267,8 +282,8 @@ Field::id(),
         let keyed = Schema {
             table: Table("fk"),
             fields: vec![
-Field::key::<String>("sku"),
-        Field::cell::<Decimal>("price").optional(),
+                Field::key::<String>("sku"),
+                Field::cell::<Decimal>("price").optional(),
             ],
             rules: Vec::new(),
         };
@@ -278,7 +293,10 @@ Field::key::<String>("sku"),
                 &keyed,
                 &[vec![
                     (Name("sku"), Value::str("s1")),
-                    (Name("price"), Value::decimal("1.5".parse::<Decimal>().unwrap())),
+                    (
+                        Name("price"),
+                        Value::decimal("1.5".parse::<Decimal>().unwrap()),
+                    ),
                 ]],
             )
             .await
@@ -289,7 +307,10 @@ Field::key::<String>("sku"),
                 &keyed,
                 &[vec![
                     (Name("sku"), Value::str("s1")),
-                    (Name("price"), Value::decimal("2.5".parse::<Decimal>().unwrap())),
+                    (
+                        Name("price"),
+                        Value::decimal("2.5".parse::<Decimal>().unwrap())
+                    ),
                 ]],
             )
             .await

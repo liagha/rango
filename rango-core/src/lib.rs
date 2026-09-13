@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+//! Core of the Rango web framework: models, routing, views, forms, and the request pipeline.
+
 pub mod app;
 pub mod error;
 #[cfg(feature = "forgery")]
@@ -11,7 +14,7 @@ pub mod view;
 
 pub use rango_store as store;
 pub use store::{
-    Column, ColumnKind, Cells, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
+    Cells, Column, ColumnKind, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
     Value, Widget, Writer,
 };
 

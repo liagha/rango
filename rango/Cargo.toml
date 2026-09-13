@@ -1,8 +1,13 @@
 [package]
-name = "rango"
+name = "rango-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "A Django-like web framework for Rust with models, routing, templates, authentication, admin, and a CLI"
+keywords = ["web", "framework", "django", "models", "store"]
+categories = ["web-programming"]
 
 [lib]
 name = "rango"

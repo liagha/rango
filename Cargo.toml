@@ -14,9 +14,10 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/liagha/rango"
 
 [workspace.dependencies]
-rango = { path = "rango", version = "0.1.0" }
+rango = { package = "rango-web", path = "rango", version = "0.1.0" }
 rango-admin = { path = "rango-admin", version = "0.1.0" }
 rango-authentication = { path = "rango-authentication", version = "0.1.0" }
 rango-core = { path = "rango-core", version = "0.1.0" }

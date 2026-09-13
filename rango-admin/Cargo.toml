@@ -3,6 +3,11 @@ name = "rango-admin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Auto-generated admin panel for Rango with per-model search, edit, and actions"
+keywords = ["admin", "panel", "web"]
+categories = ["web-programming"]
 
 [dependencies]
 rango-core = { workspace = true, features = ["forgery"] }

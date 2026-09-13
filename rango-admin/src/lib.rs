@@ -1,3 +1,7 @@
+//! Auto-generated admin panel for Rango: per-model search, edit, and row actions.
+
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 
 use axum::{
@@ -18,16 +22,19 @@ mod views;
 use history::History;
 use views::{act, create, dashboard, detail, list, remove, replace, show_edit, show_new};
 
+/// History ledger schema, exposed as an admin table of its own.
 pub fn history() -> Schema {
     History::schema()
 }
 
+/// Builder for an admin panel over a set of registered models.
 pub struct Admin {
     routes: Routes,
     models: Vec<Schema>,
 }
 
 impl Admin {
+    /// Starts a builder with no registered models, serving `/` as the dashboard.
     pub fn new() -> Self {
         let routes = Routes::new().route("/", get(dashboard));
         Self {
@@ -36,16 +43,19 @@ impl Admin {
         }
     }
 
+    /// Registers a model and mounts its list, edit, and action routes.
     pub fn model<M: Model>(mut self) -> Self {
         self.models.push(M::schema());
         self.routes = self.routes.merge(model_routes::<M>(M::table()));
         self
     }
 
+    /// Schemas of all registered models.
     pub fn schemas(&self) -> &[Schema] {
         &self.models
     }
 
+    /// Finished route tree, layered with the registered models.
     pub fn routes(self) -> Routes {
         self.routes.layer(Extension(Arc::new(self.models)))
     }

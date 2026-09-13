@@ -18,6 +18,7 @@ use super::{Authentication, Current, User};
 use crate::session::{safe_next, set_cookie, sign, token};
 
 impl Authentication {
+    /// Builds the login, logout, register and password routes behind the session middleware.
     pub fn routes(&self) -> Routes {
         let show = self.clone();
         let enter = self.clone();

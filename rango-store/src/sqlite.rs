@@ -5,6 +5,7 @@ use sea_orm::{ConnectionTrait, Database, DbBackend};
 use crate::engine::{Dialect, Engine, sql_err};
 use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
 
+/// SQLite backend dialect.
 #[derive(Clone)]
 pub struct Sqlite;
 
@@ -76,12 +77,14 @@ impl Dialect for Sqlite {
     }
 }
 
+/// Opens a SQLite database at `path`, creating it when absent, as a [`Store`].
 pub async fn open(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
     let conn = Database::connect(&url).await.map_err(sql_err)?;
     Ok(Arc::new(Engine::new(Sqlite, conn)))
 }
 
+/// Opens a SQLite database at `path` in WAL mode (busy timeout 5s) as a [`Store`].
 pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreError> {
     let url = format!("sqlite://{}?mode=rwc", path.as_ref().display());
     let conn = Database::connect(&url).await.map_err(sql_err)?;
@@ -99,7 +102,9 @@ pub async fn open_wal(path: impl AsRef<Path>) -> Result<Arc<dyn Store>, StoreErr
 mod tests {
     use super::*;
     use crate::engine::{alter, ddl, drop, kinds, rename};
-    use crate::{Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table, Tree};
+    use crate::{
+        Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table, Tree,
+    };
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
     use rust_decimal::Decimal;
 
@@ -217,9 +222,18 @@ mod tests {
         };
         db.define(&schema).await.unwrap();
         let rows = vec![
-            vec![(Name("code"), Value::str("x")), (Name("name"), Value::str("n1"))],
-            vec![(Name("code"), Value::str("x")), (Name("name"), Value::str("n2"))],
-            vec![(Name("code"), Value::str("y")), (Name("name"), Value::str("m"))],
+            vec![
+                (Name("code"), Value::str("x")),
+                (Name("name"), Value::str("n1")),
+            ],
+            vec![
+                (Name("code"), Value::str("x")),
+                (Name("name"), Value::str("n2")),
+            ],
+            vec![
+                (Name("code"), Value::str("y")),
+                (Name("name"), Value::str("m")),
+            ],
         ];
         db.create(&schema, &rows).await.unwrap();
         let query = |api| async { db.total_query(&schema, &ask(api)).await.unwrap() };

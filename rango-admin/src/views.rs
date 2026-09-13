@@ -435,9 +435,7 @@ pub(crate) async fn detail<M: Model>(
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, field)| {
-                    !field.id && !field.keyed && !field.many
-                })
+                .filter(|(_, field)| !field.id && !field.keyed && !field.many)
                 .map(|(i, _)| i)
                 .collect();
             let mut items = Vec::new();

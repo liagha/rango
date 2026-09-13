@@ -1,17 +1,23 @@
 use std::sync::Arc;
 
 use rango_core::{
+    Error, Reader, Repository, Storable, Store, StoreError, Value, Writer,
     chrono::{DateTime, Utc},
     model::{Field, Model, Name, Table},
-    Error, Reader, Repository, Storable, Store, StoreError, Value, Writer,
 };
 
+/// A registered account persisted in the `users` repository.
 #[derive(Clone)]
 pub struct User {
+    /// Store-assigned unique id.
     pub id: i64,
+    /// Unique login name.
     pub username: String,
+    /// Bcrypt password hash.
     pub password: String,
+    /// Account creation timestamp.
     pub created: DateTime<Utc>,
+    /// Whether the user has superuser rights.
     pub superuser: bool,
 }
 
@@ -58,6 +64,7 @@ impl Model for User {
 }
 
 impl User {
+    /// Validates and saves a new user, returning an error on bad input or a taken username.
     pub async fn register(
         store: Arc<dyn Store>,
         username: &str,
@@ -91,6 +98,7 @@ impl User {
         }
     }
 
+    /// Verifies a username and password, returning the matching user or `None`.
     pub async fn login(
         store: Arc<dyn Store>,
         username: &str,
@@ -113,10 +121,8 @@ mod tests {
     use super::*;
 
     async fn open(name: &str) -> Arc<dyn Store> {
-        let path = std::env::temp_dir().join(format!(
-            "rango-test-{}-{name}.sqlite",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rango-test-{}-{name}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         rango_core::store::sqlite::open(&path).await.unwrap()
     }
@@ -163,13 +169,17 @@ mod tests {
             .unwrap();
         assert!(found.superuser);
         assert_eq!(found.id, 1);
-        assert!(User::login(store.clone(), "alice", "wrongpass")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(User::login(store, "nobody", "password123")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            User::login(store.clone(), "alice", "wrongpass")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            User::login(store, "nobody", "password123")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

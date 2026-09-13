@@ -1,3 +1,5 @@
+//! Model trait and repository over the store.
+
 use std::{marker::PhantomData, sync::Arc};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
@@ -12,14 +14,22 @@ pub use crate::store::{
     Run, Schema, Sort, Table, Tree,
 };
 
+/// A domain type mapped to a store table.
 pub trait Model: Clone + Send + Sync + 'static {
+    /// Table this model maps to.
     fn table() -> Table;
+    /// Field definitions for this model's table.
     fn fields() -> Vec<Field>;
+    /// Write all non-id values to the given writer.
     fn write(&self, w: &mut dyn Writer);
+    /// Read a new value from the given reader.
     fn read(r: &mut dyn Reader) -> Result<Self, StoreError>;
+    /// Write just the id values to the given writer.
     fn write_id(&self, w: &mut dyn Writer);
+    /// Read just the id values from the given reader.
     fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError>;
 
+    /// Names of the plain cell columns.
     fn columns() -> Vec<Name> {
         Self::fields()
             .into_iter()
@@ -28,6 +38,7 @@ pub trait Model: Clone + Send + Sync + 'static {
             .collect()
     }
 
+    /// Names of the text columns, used for free-text search.
     fn search() -> Vec<Name> {
         Self::fields()
             .into_iter()
@@ -36,14 +47,17 @@ pub trait Model: Clone + Send + Sync + 'static {
             .collect()
     }
 
+    /// Names of the columns the UI shows as read-only.
     fn readonly() -> Vec<Name> {
         Vec::new()
     }
 
+    /// Actions the UI offers, defaulting to wipe.
     fn actions() -> Vec<Action> {
         vec![Action::wipe()]
     }
 
+    /// Schema derived from this model's table and fields.
     fn schema() -> Schema {
         Schema {
             table: Self::table(),
@@ -52,16 +66,19 @@ pub trait Model: Clone + Send + Sync + 'static {
         }
     }
 
+    /// Full schema including any overriding rules.
     fn spec() -> Schema {
         Self::schema()
     }
 
+    /// Cell values of this model in field order.
     fn row(&self) -> Vec<Value> {
         let mut slots = Slots::new();
         self.write(&mut slots);
         slots.values()
     }
 
+    /// Key value of this model.
     fn id(&self) -> Value {
         let mut gather = Gather::new();
         self.write_id(&mut gather);
@@ -69,14 +86,17 @@ pub trait Model: Clone + Send + Sync + 'static {
     }
 }
 
+/// Name of the model's key column.
 pub fn id_column<M: Model>() -> Name {
     M::schema().key()
 }
 
+/// Key value parsed from a raw string using the model's schema.
 pub fn key<M: Model>(raw: &str) -> Value {
     Key::parse(raw, &M::schema()).value()
 }
 
+/// Rows linked to this model through a many-to-many `via` field.
 pub async fn related<M: Model>(
     store: &Arc<dyn Store>,
     schemas: &[Schema],
@@ -171,6 +191,7 @@ pub async fn related<M: Model>(
         .await
 }
 
+/// Full CRUD access to one model over a store; usable as an axum extractor.
 pub struct Repository<M = ()> {
     store: Arc<dyn Store>,
     marker: PhantomData<M>,
@@ -193,6 +214,7 @@ fn pairs<M: Model>(model: &M) -> Vec<(Name, Value)> {
 }
 
 impl<M: Model> Repository<M> {
+    /// Repository over the given store.
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self {
             store,
@@ -204,10 +226,12 @@ impl<M: Model> Repository<M> {
         self.store.define(&M::schema()).await
     }
 
+    /// Insert the model and store its generated key.
     pub async fn save(&self, model: &mut M) -> Result<(), StoreError> {
         self.save_many(std::slice::from_mut(model)).await
     }
 
+    /// Insert a batch of models in one call.
     pub async fn save_many(&self, models: &mut [M]) -> Result<(), StoreError> {
         if models.is_empty() {
             return Ok(());
@@ -222,6 +246,7 @@ impl<M: Model> Repository<M> {
         Ok(())
     }
 
+    /// Load one model by key value.
     pub async fn get(&self, id: &Value) -> Result<Option<M>, StoreError> {
         let schema = M::schema();
         let mut rows = self
@@ -243,6 +268,7 @@ impl<M: Model> Repository<M> {
         Ok(rows.pop())
     }
 
+    /// All models ordered by key.
     pub async fn all(&self) -> Result<Vec<M>, StoreError> {
         let schema = M::schema();
         self.scan_query(&Query {
@@ -258,6 +284,7 @@ impl<M: Model> Repository<M> {
         .await
     }
 
+    /// Models whose given field equals the value.
     pub async fn filter(&self, field: Name, value: &Value) -> Result<Vec<M>, StoreError> {
         let schema = M::schema();
         self.scan_query(&Query {
@@ -277,6 +304,7 @@ impl<M: Model> Repository<M> {
         .await
     }
 
+    /// All models with the given sort applied.
     pub async fn ordered(&self, sort: Sort) -> Result<Vec<M>, StoreError> {
         self.scan_query(&Query {
             tree: Tree::And(Vec::new()),
@@ -288,6 +316,7 @@ impl<M: Model> Repository<M> {
         .await
     }
 
+    /// Models matched by the query, refusing projected rows.
     pub async fn scan_query(&self, query: &Query) -> Result<Vec<M>, StoreError> {
         if matches!(query.only, Only::Some(_)) {
             return Err(StoreError::Unsupported("projected rows need rows()".into()));
@@ -296,21 +325,25 @@ impl<M: Model> Repository<M> {
         rows.iter().map(|row| M::read(&mut row.cells())).collect()
     }
 
+    /// Raw rows matched by the query.
     pub async fn rows(&self, query: &Query) -> Result<Vec<Row>, StoreError> {
         self.ensure().await?;
         self.store.scan_query(&M::schema(), query).await
     }
 
+    /// Count of rows matched by the query.
     pub async fn total_query(&self, query: &Query) -> Result<usize, StoreError> {
         self.ensure().await?;
         self.store.total_query(&M::schema(), query).await
     }
 
+    /// Aggregate value computed by the query's mass action.
     pub async fn mass(&self, query: &Query) -> Result<Value, StoreError> {
         self.ensure().await?;
         self.store.mass(&M::schema(), query).await
     }
 
+    /// Replace the row for this model's key.
     pub async fn update(&self, model: &M) -> Result<(), StoreError> {
         self.ensure().await?;
         self.store
@@ -318,6 +351,7 @@ impl<M: Model> Repository<M> {
             .await
     }
 
+    /// Delete the row with the given key value.
     pub async fn delete(&self, id: &Value) -> Result<(), StoreError> {
         self.ensure().await?;
         self.store.remove(&M::schema(), &Key::of(id)?).await

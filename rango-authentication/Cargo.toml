@@ -3,6 +3,11 @@ name = "rango-authentication"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Authentication and sessions for Rango: signup, login, users, and auth views"
+keywords = ["authentication", "sessions", "login"]
+categories = ["web-programming"]
 
 [features]
 default = ["views"]

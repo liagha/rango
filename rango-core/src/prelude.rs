@@ -1,3 +1,5 @@
+//! Common imports for Rango apps.
+
 pub use crate::app::App;
 pub use crate::error::Error;
 #[cfg(feature = "forgery")]
@@ -9,7 +11,7 @@ pub use crate::model::{
 };
 pub use crate::settings::Settings;
 pub use crate::store::{
-    Column, ColumnKind, Cells, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
+    Cells, Column, ColumnKind, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
     Value, Widget, Writer,
 };
 pub use crate::urls::Routes;

@@ -1,5 +1,9 @@
 # Rango
 
+[![crates.io](https://img.shields.io/crates/v/rango-web)](https://crates.io/crates/rango-web)
+[![docs.rs](https://img.shields.io/docsrs/rango-web)](https://docs.rs/rango-web)
+[![license](https://img.shields.io/crates/l/rango-web)](LICENSE)
+
 A Django-like web framework for Rust.
 
 Models, routing, templates, authentication, an admin panel, and a CLI for scaffolding
@@ -13,6 +17,18 @@ that runs on SQLite or PostgreSQL.
 - **Authentication** — sessions, signup toggle, superuser admin
 - **Admin** — auto-generated panel with search, edit, and actions per model
 - **CLI** — `create project`, `create user`, `migrate` commands
+
+## Install
+
+```
+cargo add rango-web
+```
+
+The import name stays `rango`:
+
+```rust
+use rango::Rango;
+```
 
 ## Quick start
 
@@ -45,3 +61,16 @@ async fn main() -> ExitCode {
 
 - [Getting started](docs/getting-started.md) — install, project layout, models, routes, templates, authentication, database, CLI
 - [Model reference](docs/model.md) — types, fields, queries, keys, repository, store trait, backends, transactions
+- [API reference](https://docs.rs/rango) — rustdoc for every crate
+
+## Workspace
+
+The framework is split into focused crates, all re-exported through `rango`:
+
+- [`rango-web`](rango) — facade, one import for everything, published as `rango-web`
+- [`rango-core`](rango-core) — models, routing, views, forms, request pipeline
+- [`rango-store`](rango-store) — typed SQLite/PostgreSQL storage
+- [`rango-authentication`](rango-authentication) — signup, login, sessions
+- [`rango-admin`](rango-admin) — auto-generated admin panel
+- [`rango-macros`](rango-macros) — `Model` derive and attribute macros
+- [`examples/helloworld`](examples/helloworld) — minimal runnable app

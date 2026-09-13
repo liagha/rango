@@ -1,8 +1,8 @@
 use rango_authentication::Current;
 use rango_core::{
+    Reader, Repository, Storable, StoreError, Value, Writer,
     chrono::{DateTime, Utc},
     model::{Field, Model, Table},
-    Reader, Repository, Storable, StoreError, Value, Writer,
 };
 
 use super::row::text;
@@ -119,10 +119,8 @@ mod tests {
     use super::*;
 
     async fn open(name: &str) -> std::sync::Arc<dyn rango_core::Store> {
-        let path = std::env::temp_dir().join(format!(
-            "rango-test-{}-{name}.sqlite",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rango-test-{}-{name}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         rango_core::store::sqlite::open(&path).await.unwrap()
     }

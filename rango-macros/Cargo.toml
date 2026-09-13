@@ -3,6 +3,11 @@ name = "rango-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Procedural macros for Rango: the Model derive and template and main attributes"
+keywords = ["macros", "derive", "model"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

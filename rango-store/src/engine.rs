@@ -83,11 +83,7 @@ pub(crate) fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, Store
     Ok(Row { values })
 }
 
-pub(crate) fn leaf<D: Dialect>(
-    dialect: &D,
-    filter: &Filter,
-    params: &mut Vec<Value>,
-) -> String {
+pub(crate) fn leaf<D: Dialect>(dialect: &D, filter: &Filter, params: &mut Vec<Value>) -> String {
     match filter.op {
         Op::Eq => {
             params.push(filter.value.clone());
@@ -122,7 +118,10 @@ pub(crate) fn leaf<D: Dialect>(
                 let lo = dialect.mark(params.len() - 1);
                 params.push(Value::datetime(end));
                 let hi = dialect.mark(params.len() - 1);
-                format!("\"{}\" >= {lo} AND \"{}\" < {hi}", filter.field, filter.field)
+                format!(
+                    "\"{}\" >= {lo} AND \"{}\" < {hi}",
+                    filter.field, filter.field
+                )
             }
             _ => "1 = 0".into(),
         },
@@ -278,11 +277,7 @@ pub(crate) fn ddl<D: Dialect>(dialect: &D, schema: &Schema) -> String {
     )
 }
 
-pub(crate) fn alter<D: Dialect>(
-    dialect: &D,
-    schema: &Schema,
-    have: &[Column],
-) -> Vec<String> {
+pub(crate) fn alter<D: Dialect>(dialect: &D, schema: &Schema, have: &[Column]) -> Vec<String> {
     let moved = moved(schema, have);
     let mut out = Vec::new();
     for field in &schema.fields {
@@ -474,7 +469,9 @@ async fn run_define<D: Dialect>(
     dialect: &D,
     schema: &Schema,
 ) -> Result<(), StoreError> {
-    run_execute(conn, dialect, &ddl(dialect, schema), &[]).await.map(|_| ())
+    run_execute(conn, dialect, &ddl(dialect, schema), &[])
+        .await
+        .map(|_| ())
 }
 
 async fn run_create<D: Dialect>(
@@ -486,10 +483,7 @@ async fn run_create<D: Dialect>(
     if batch.is_empty() {
         return Ok(Vec::new());
     }
-    let keyed = schema
-        .fields
-        .iter()
-        .any(|field| field.keyed && !field.id);
+    let keyed = schema.fields.iter().any(|field| field.keyed && !field.id);
     if keyed {
         let head = &batch[0];
         let columns = head
@@ -545,10 +539,7 @@ async fn run_replace<D: Dialect>(
     let mut params = Vec::with_capacity(cells.len() + 1);
     for (name, value) in cells {
         params.push(value.clone());
-        sets.push(format!(
-            "\"{name}\" = {}",
-            dialect.mark(params.len() - 1)
-        ));
+        sets.push(format!("\"{name}\" = {}", dialect.mark(params.len() - 1)));
     }
     params.push(key.clone());
     let sql = format!(
@@ -571,11 +562,7 @@ async fn run_upsert<D: Dialect>(
     if batch.is_empty() {
         return Ok(0);
     }
-    if !schema
-        .fields
-        .iter()
-        .any(|field| field.keyed && !field.id)
-    {
+    if !schema.fields.iter().any(|field| field.keyed && !field.id) {
         let created = run_create(conn, dialect, schema, batch).await?;
         return Ok(created.len());
     }
@@ -811,9 +798,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let sql = sql.to_string();
         let params = params.to_vec();
         let kinds = kinds.to_vec();
-        Box::pin(async move {
-            run_fetch(&self.conn, &self.dialect, &sql, &params, &kinds).await
-        })
+        Box::pin(async move { run_fetch(&self.conn, &self.dialect, &sql, &params, &kinds).await })
     }
 
     fn scan_query<'a>(
@@ -870,9 +855,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let schema = schema.clone();
         let key = key.value();
         let cells = cells.to_vec();
-        Box::pin(async move {
-            run_replace(&self.conn, &self.dialect, &schema, &key, &cells).await
-        })
+        Box::pin(async move { run_replace(&self.conn, &self.dialect, &schema, &key, &cells).await })
     }
 
     fn remove<'a>(
@@ -922,9 +905,9 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         let table = table.to_string();
         let columns = columns.to_vec();
         let values = values.to_vec();
-        Box::pin(async move {
-            run_insert(&self.dialect, &self.conn, &table, &columns, &values).await
-        })
+        Box::pin(
+            async move { run_insert(&self.dialect, &self.conn, &table, &columns, &values).await },
+        )
     }
 
     fn deal<'a>(&'a self) -> BoxFuture<'a, Result<Arc<dyn Store>, StoreError>> {
