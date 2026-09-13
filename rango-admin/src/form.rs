@@ -102,28 +102,69 @@ fn control(field: &Field, value: &str, checked: bool) -> String {
             )
         }
         Widget::Choice => {
-            let mut options = String::new();
-            if field.optional || value.is_empty() {
-                options.push_str(r#"<option value="">---------</option>"#);
-            }
-            for choice in field.choices {
-                let picked = if choice.value.as_str() == value {
-                    " selected"
-                } else {
-                    ""
-                };
-                options.push_str(&format!(
-                    r#"<option value="{}"{}>{}</option>"#,
-                    escape(choice.value.as_str()),
-                    picked,
-                    escape(choice.label)
-                ));
-            }
-            format!(
-                r#"{label}<select id="admin-{name}" name="{name}">{options}</select>"#
+            let options: Vec<(String, String)> = field
+                .choices
+                .iter()
+                .map(|choice| (choice.value.as_str().to_string(), choice.label.to_string()))
+                .collect();
+            let picked = vec![value.to_string()];
+            let blank = (field.optional || value.is_empty()).then_some("---------");
+            let id = format!("admin-{name}");
+            select(
+                &id,
+                name.as_str(),
+                false,
+                blank,
+                &picked,
+                &options,
             )
         }
     }
+}
+
+fn select(
+    id: &str,
+    name: &str,
+    multiple: bool,
+    blank: Option<&str>,
+    picked: &[String],
+    options: &[(String, String)],
+) -> String {
+    let mut tag = String::new();
+    if let Some(label) = blank {
+        tag.push_str(&format!(r#"<option value="">{label}</option>"#));
+    }
+    for (value, label) in options {
+        let marked = if picked.contains(value) { " selected" } else { "" };
+        tag.push_str(&format!(
+            r#"<option value="{}"{}>{}</option>"#,
+            escape(value),
+            marked,
+            escape(label)
+        ));
+    }
+    let many = if multiple { " multiple" } else { "" };
+    format!(
+        r#"<label for="{id}">{name}</label><select id="{id}" name="{name}"{many}>{tag}</select>"#
+    )
+}
+
+pub(crate) fn reference_input(field: &Field, selected: &str, options: &[(String, String)]) -> String {
+    if field.id || field.many {
+        return String::new();
+    }
+    let blank = (field.optional || selected.is_empty()).then_some("---------");
+    let picked = vec![selected.to_string()];
+    let name = field.name.as_str();
+    select(&format!("admin-{name}"), name, false, blank, &picked, options)
+}
+
+pub(crate) fn links_input(field: &Field, picked: &[String], options: &[(String, String)]) -> String {
+    if field.id {
+        return String::new();
+    }
+    let name = field.name.as_str();
+    select(&format!("admin-{name}"), name, true, None, picked, options)
 }
 
 pub(crate) fn filter_input(field: &Field, value: &str) -> String {
@@ -158,24 +199,14 @@ pub(crate) fn filter_input(field: &Field, value: &str) -> String {
             )
         }
         Widget::Choice => {
-            let mut options = String::new();
-            options.push_str(r#"<option value="">Any</option>"#);
-            for choice in field.choices {
-                let picked = if choice.value.as_str() == value {
-                    " selected"
-                } else {
-                    ""
-                };
-                options.push_str(&format!(
-                    r#"<option value="{}"{}>{}</option>"#,
-                    escape(choice.value.as_str()),
-                    picked,
-                    escape(choice.label)
-                ));
-            }
-            format!(
-                r#"{label}<select id="filter-{name}" name="{name}">{options}</select>"#
-            )
+            let options: Vec<(String, String)> = field
+                .choices
+                .iter()
+                .map(|choice| (choice.value.as_str().to_string(), choice.label.to_string()))
+                .collect();
+            let picked = vec![value.to_string()];
+            let id = format!("filter-{name}");
+            select(&id, name.as_str(), false, Some("Any"), &picked, &options)
         }
     }
 }
@@ -238,6 +269,26 @@ mod tests {
         assert_eq!(shown(&field, Some(&Value::str("red"))), "Red");
         let filter = filter_input(&field, "red");
         assert!(filter.contains(r#"value="red" selected"#));
+    }
+
+    #[test]
+    fn relations() {
+        let field = Field::cell::<i64>("owner");
+        let options = vec![
+            ("1".to_string(), "one".to_string()),
+            ("2".to_string(), "two".to_string()),
+        ];
+        let html = reference_input(&field, "2", &options);
+        assert!(html.contains(r#"<select"#));
+        assert!(html.contains(r#"value="2" selected"#));
+        assert!(!html.contains(r#"multiple"#));
+        assert_eq!(value(&field, Some(&raw("1"))).unwrap(), Value::int(1));
+        let many = Field::many("tags");
+        let links = links_input(&many, &["2".to_string()], &options);
+        assert!(links.contains(r#"multiple"#));
+        assert!(links.contains(r#"value="2" selected"#));
+        let blank = reference_input(&field, "2", &options);
+        assert!(!blank.contains(r#"value="">---------</option>"#));
     }
 
     #[test]

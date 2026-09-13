@@ -10,13 +10,13 @@ use rango_core::{
     Cells, Error, Repository, Response, Store, Value, Widget,
     forgery::{Token, cookie},
     model::{
-        Action as Deed, Filter, Key, Model, Name, Only, Op, Order, Page, Query, Schema, Sort,
-        Table, Tree,
+        Action as Deed, Field, Filter, Key, Link, Model, Name, Only, Op, Order, Page, Query, Schema,
+        Sort, Table, Tree,
     },
     view::{self, render},
 };
 
-use super::form::{filter_input, input, input_raw, locked, value};
+use super::form::{filter_input, input, input_raw, links_input, locked, reference_input, value};
 use super::history::{Action, History, log};
 use super::query::{PAGE, encode, here, href, tree};
 use super::row::{align, cell, id_of, locate, text, when, with_id};
@@ -131,6 +131,139 @@ fn back(uri: &Uri, drop: usize) -> String {
         parts.pop();
     }
     format!("/{}/", parts.join("/"))
+}
+
+fn target<'a>(models: &'a [Schema], field: &Field) -> Option<&'a Schema> {
+    if let Some((table, _)) = field.reference() {
+        return models.iter().find(|entry| entry.table == table);
+    }
+    let Some(Link::Via(through_table, _, theirs)) = &field.link else {
+        return None;
+    };
+    let through = models.iter().find(|entry| entry.table == *through_table)?;
+    let column = through.fields.iter().find(|entry| entry.name == *theirs)?;
+    let Some(Link::To(table, _)) = &column.link else {
+        return None;
+    };
+    models.iter().find(|entry| entry.table == *table)
+}
+
+async fn options(store: &Arc<dyn Store>, schema: &Schema) -> Vec<(String, String)> {
+    let rows = store
+        .scan_query(
+            schema,
+            &Query {
+                tree: Tree::And(Vec::new()),
+                sort: vec![Sort {
+                    field: schema.key(),
+                    order: Order::Asc,
+                }],
+                page: Page::all(),
+                only: Only::All,
+                mass: None,
+            },
+        )
+        .await
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for row in rows {
+        let values = align(&row.values, &schema.fields);
+        let key = id_of(&values, &schema.fields);
+        let label = schema
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| !field.many && field.load() == Widget::Text)
+            .map(|(i, _)| text(values.get(i)))
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| key.clone());
+        out.push((key, label));
+    }
+    out
+}
+
+async fn picked(store: &Arc<dyn Store>, schemas: &[Schema], field: &Field, id: &Value) -> Vec<String> {
+    let Some(Link::Via(through_table, mine, theirs)) = &field.link else {
+        return Vec::new();
+    };
+    let Some(through) = schemas.iter().find(|entry| entry.table == *through_table) else {
+        return Vec::new();
+    };
+    store
+        .scan_query(
+            through,
+            &Query {
+                tree: Tree::Leaf(Filter {
+                    field: *mine,
+                    op: Op::Eq,
+                    value: id.clone(),
+                }),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![*theirs]),
+                mass: None,
+            },
+        )
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| row.get(0).map(|value| text(Some(value))))
+        .filter(|key| !key.is_empty())
+        .collect()
+}
+
+async fn links(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    field: &Field,
+    id: &Value,
+    chosen: &[String],
+) -> Result<(), Error> {
+    let Some(Link::Via(through_table, mine, theirs)) = &field.link else {
+        return Ok(());
+    };
+    let Some(through) = schemas.iter().find(|entry| entry.table == *through_table) else {
+        return Ok(());
+    };
+    let Some(column) = through.fields.iter().find(|entry| entry.name == *theirs) else {
+        return Ok(());
+    };
+    store.define(through).await?;
+    let rows = store
+        .scan_query(
+            through,
+            &Query {
+                tree: Tree::Leaf(Filter {
+                    field: *mine,
+                    op: Op::Eq,
+                    value: id.clone(),
+                }),
+                sort: Vec::new(),
+                page: Page::all(),
+                only: Only::Some(vec![through.key()]),
+                mass: None,
+            },
+        )
+        .await?;
+    let mut batch = Vec::new();
+    for row in rows {
+        let Some(key) = row.get(0) else {
+            continue;
+        };
+        store.remove(through, &Key::of(key)?).await?;
+    }
+    for raw in chosen {
+        if raw.is_empty() {
+            continue;
+        }
+        let mut value = Value::Null;
+        (column.parse)(raw, &mut value)?;
+        batch.push(vec![(*mine, id.clone()), (*theirs, value)]);
+    }
+    if !batch.is_empty() {
+        store.create(through, &batch).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn dashboard(
@@ -469,21 +602,27 @@ pub(crate) async fn detail<M: Model>(
 }
 
 pub(crate) async fn show_new<M: Model>(
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
 ) -> Result<Response, Error> {
     let fixed = M::readonly();
-    let inputs = M::fields()
-        .iter()
-        .filter(|field| !field.id)
-        .map(|field| {
-            if fixed.contains(&field.name) {
-                locked(field, Some(&field.initial()))
+    let mut inputs = Vec::new();
+    for field in M::fields().iter().filter(|field| !field.id) {
+        let html = if fixed.contains(&field.name) {
+            locked(field, Some(&field.initial()))
+        } else if let Some(schema) = target(&models.0, field) {
+            if field.many {
+                links_input(field, &[], &options(&store, schema).await)
             } else {
-                input(field, Some(&field.initial()))
+                reference_input(field, "", &options(&store, schema).await)
             }
-        })
-        .collect();
+        } else {
+            input(field, Some(&field.initial()))
+        };
+        inputs.push(html);
+    }
     render(FormView {
         title: format!("New {}", M::table()),
         model: M::table(),
@@ -496,20 +635,28 @@ pub(crate) async fn show_new<M: Model>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     current: Current,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
-    Form(map): Form<HashMap<String, String>>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, Error> {
     let fields = M::fields();
     let fixed = M::readonly();
+    let map: HashMap<String, String> = pairs
+        .iter()
+        .map(|(name, raw)| (name.clone(), raw.clone()))
+        .collect();
     let mut values = Vec::with_capacity(fields.len());
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
+    let mut picks: Vec<(&Field, Vec<String>)> = Vec::new();
     for field in &fields {
         if field.id {
             values.push(Value::int(0));
@@ -520,11 +667,33 @@ pub(crate) async fn create<M: Model>(
             values.push(field.initial());
             continue;
         }
+        if field.many {
+            let chosen: Vec<String> = pairs
+                .iter()
+                .filter(|(name, _)| name == field.name.as_str())
+                .map(|(_, raw)| raw.clone())
+                .collect();
+            let options = match target(&models.0, field) {
+                Some(schema) => options(&store, schema).await,
+                None => Vec::new(),
+            };
+            inputs.push(links_input(field, &chosen, &options));
+            picks.push((field, chosen));
+            continue;
+        }
         let raw = map
             .get(field.name.as_str())
             .map(String::as_str)
             .unwrap_or("");
-        inputs.push(input_raw(field, raw));
+        if field.reference().is_some() {
+            let options = match target(&models.0, field) {
+                Some(schema) => options(&store, schema).await,
+                None => Vec::new(),
+            };
+            inputs.push(reference_input(field, raw, &options));
+        } else {
+            inputs.push(input_raw(field, raw));
+        }
         match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
             Err(fail) => {
@@ -547,12 +716,18 @@ pub(crate) async fn create<M: Model>(
     }
     let mut model = M::read(&mut Cells::new(&values))?;
     repository.save(&mut model).await?;
+    let id = model.id();
+    for (field, chosen) in picks {
+        links(&store, &models.0, field, &id, &chosen).await?;
+    }
     log(&history, M::table(), &model.id(), Action::Create, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
 }
 
 pub(crate) async fn show_edit<M: Model>(
     repository: Repository<M>,
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<String>,
@@ -565,16 +740,32 @@ pub(crate) async fn show_edit<M: Model>(
     let mut slots = values.iter();
     let mut inputs = Vec::new();
     let fixed = M::readonly();
+    let model_id = model.id();
     for field in M::fields() {
         if field.id {
             continue;
         }
-        let old = slots.next();
-        if fixed.contains(&field.name) || field.keyed {
-            inputs.push(locked(&field, old));
-        } else {
-            inputs.push(input(&field, old));
+        let mut old = None;
+        if !field.many {
+            old = slots.next();
         }
+        let html = if fixed.contains(&field.name) || field.keyed {
+            locked(&field, old)
+        } else if let Some(schema) = target(&models.0, &field) {
+            let options = options(&store, schema).await;
+            if field.many {
+                links_input(
+                    &field,
+                    &picked(&store, &models.0, &field, &model_id).await,
+                    &options,
+                )
+            } else {
+                reference_input(&field, &text(old), &options)
+            }
+        } else {
+            input(&field, old)
+        };
+        inputs.push(html);
     }
     render(FormView {
         title: format!("Edit {} {id}", M::table()),
@@ -592,12 +783,14 @@ pub(crate) async fn show_edit<M: Model>(
 pub(crate) async fn replace<M: Model>(
     repository: Repository<M>,
     history: Repository<History>,
+    store: Extension<Arc<dyn Store>>,
+    models: Extension<Arc<Vec<Schema>>>,
     current: Current,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     guard: Option<Extension<Token>>,
     Path(id): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, Error> {
     let saved = repository
         .get(&Repository::<M>::key(&id))
@@ -605,16 +798,25 @@ pub(crate) async fn replace<M: Model>(
         .ok_or(Error::NotFound)?;
     let fields = M::fields();
     let fixed = M::readonly();
+    let map: HashMap<String, String> = pairs
+        .iter()
+        .map(|(name, raw)| (name.clone(), raw.clone()))
+        .collect();
     let have = saved.row();
     let mut slots = have.iter();
     let mut values = vec![saved.id()];
     let mut inputs = Vec::new();
     let mut problems = Vec::new();
+    let mut picks: Vec<(&Field, Vec<String>)> = Vec::new();
+    let id_value = saved.id();
     for field in &fields {
         if field.id {
             continue;
         }
-        let old = slots.next();
+        let mut old = None;
+        if !field.many {
+            old = slots.next();
+        }
         if field.keyed {
             continue;
         }
@@ -623,11 +825,37 @@ pub(crate) async fn replace<M: Model>(
             values.push(old.cloned().unwrap_or(Value::Null));
             continue;
         }
+        if field.many {
+            let chosen: Vec<String> = pairs
+                .iter()
+                .filter(|(name, _)| name == field.name.as_str())
+                .map(|(_, raw)| raw.clone())
+                .collect();
+            let options = match target(&models.0, field) {
+                Some(schema) => options(&store, schema).await,
+                None => Vec::new(),
+            };
+            inputs.push(links_input(
+                field,
+                &picked(&store, &models.0, field, &id_value).await,
+                &options,
+            ));
+            picks.push((field, chosen));
+            continue;
+        }
         let raw = map
             .get(field.name.as_str())
             .map(String::as_str)
             .unwrap_or("");
-        inputs.push(input_raw(field, raw));
+        if field.reference().is_some() {
+            let options = match target(&models.0, field) {
+                Some(schema) => options(&store, schema).await,
+                None => Vec::new(),
+            };
+            inputs.push(reference_input(field, raw, &options));
+        } else {
+            inputs.push(input_raw(field, raw));
+        }
         match value(field, map.get(field.name.as_str())) {
             Ok(value) => values.push(value),
             Err(fail) => {
@@ -650,6 +878,9 @@ pub(crate) async fn replace<M: Model>(
     }
     let model = M::read(&mut Cells::new(&values))?;
     repository.update(&model).await?;
+    for (field, chosen) in picks {
+        links(&store, &models.0, field, &id_value, &chosen).await?;
+    }
     log(&history, M::table(), &Repository::<M>::key(&id), Action::Edit, &current).await;
     Ok(view::redirect(&format!("{}?saved=1", back(&uri, 1))))
 }
