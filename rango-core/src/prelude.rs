@@ -11,8 +11,7 @@ pub use crate::model::{
 };
 pub use crate::settings::Settings;
 pub use crate::store::{
-    Cells, Column, ColumnKind, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
-    Value, Widget, Writer,
+    Cells, Column, Reader, Row, Show, Storable, Store, StoreError, Value, Widget, Writer,
 };
 pub use crate::urls::Routes;
 pub use crate::view::{Json, Request, Response, View, get_view, html, json, redirect, render};

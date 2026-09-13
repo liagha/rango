@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, QueryResult};
 
 use crate::engine::{Dialect, Engine};
-use crate::{ColumnKind, Store, StoreError};
+use crate::{Column, Store, StoreError};
 
 /// SQLite backend dialect.
 #[derive(Clone)]
@@ -30,9 +30,9 @@ impl Dialect for Sqlite {
         format!("PRAGMA table_info(\"{table}\")")
     }
 
-    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
+    fn shape(&self, row: &QueryResult) -> Result<(String, Column), DbErr> {
         let name = row.try_get_by_index::<String>(1)?;
-        let kind = ColumnKind::of(&row.try_get_by_index::<String>(2)?);
+        let kind = Column::of(&row.try_get_by_index::<String>(2)?);
         Ok((name, kind))
     }
 
@@ -48,11 +48,11 @@ impl Dialect for Sqlite {
         Some("SELECT last_insert_rowid()")
     }
 
-    fn sum(&self, _kind: ColumnKind, column: &str) -> String {
+    fn sum(&self, _kind: Column, column: &str) -> String {
         format!("SUM(\"{column}\")")
     }
 
-    fn mean(&self, _kind: ColumnKind, column: &str) -> String {
+    fn mean(&self, _kind: Column, column: &str) -> String {
         format!("AVG(\"{column}\")")
     }
 }
@@ -114,11 +114,8 @@ mod tests {
         }
     }
 
-    fn col(name: &str, kind: ColumnKind) -> Column {
-        Column {
-            name: name.to_string(),
-            kind,
-        }
+    fn col(name: &str, kind: Column) -> (String, Column) {
+        (name.to_string(), kind)
     }
 
     fn posts() -> Schema {
@@ -147,18 +144,18 @@ mod tests {
             Sqlite.ddl(&keyed()),
             "CREATE TABLE IF NOT EXISTS \"products\" (\"sku\" TEXT PRIMARY KEY, \"price\" TEXT NOT NULL)"
         );
-        assert_eq!(posts().kinds(), vec![ColumnKind::Integer, ColumnKind::Text]);
+        assert_eq!(posts().kinds(), vec![Column::Integer, Column::Text]);
     }
 
     #[test]
     fn alters() {
         let schema = posts();
         let have = vec![
-            col("id", ColumnKind::Integer),
-            col("title", ColumnKind::Text),
+            col("id", Column::Integer),
+            col("title", Column::Text),
         ];
         assert!(Sqlite.alter(&schema, &have).is_empty());
-        let missing = vec![col("id", ColumnKind::Integer)];
+        let missing = vec![col("id", Column::Integer)];
         assert_eq!(Sqlite.alter(&schema, &missing).len(), 1);
     }
 
@@ -166,9 +163,9 @@ mod tests {
     fn drops() {
         let schema = posts();
         let have = vec![
-            col("id", ColumnKind::Integer),
-            col("title", ColumnKind::Text),
-            col("junk", ColumnKind::Text),
+            col("id", Column::Integer),
+            col("title", Column::Text),
+            col("junk", Column::Text),
         ];
         assert_eq!(schema.drop(&have, &[]).len(), 1);
         assert!(schema.drop(&have[..2], &[]).is_empty());
@@ -178,16 +175,16 @@ mod tests {
     fn renames() {
         let schema = posts();
         let have = vec![
-            col("id", ColumnKind::Integer),
-            col("name", ColumnKind::Text),
+            col("id", Column::Integer),
+            col("name", Column::Text),
         ];
         assert_eq!(schema.rename(&have, &[]).len(), 1);
         assert!(Sqlite.alter(&schema, &have).is_empty());
         assert!(schema.drop(&have, &[]).is_empty());
         let mixed = vec![
-            col("id", ColumnKind::Integer),
-            col("name", ColumnKind::Text),
-            col("age", ColumnKind::Integer),
+            col("id", Column::Integer),
+            col("name", Column::Text),
+            col("age", Column::Integer),
         ];
         assert_eq!(schema.rename(&mixed, &[]).len(), 1);
         assert!(Sqlite.alter(&schema, &mixed).is_empty());
@@ -479,7 +476,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|col| col.name)
+            .map(|(name, _)| name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"age".to_string()));
         assert_eq!(db.evolve(&one, false).await.unwrap(), 1);
@@ -489,7 +486,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|col| col.name)
+            .map(|(name, _)| name)
             .collect::<Vec<_>>();
         assert!(!names.contains(&"age".to_string()));
     }
@@ -583,12 +580,12 @@ mod tests {
         .unwrap();
         assert_eq!(db.last_id("t").await.unwrap(), 1);
         let kinds = [
-            ColumnKind::Integer,
-            ColumnKind::Text,
-            ColumnKind::Integer,
-            ColumnKind::Real,
-            ColumnKind::Integer,
-            ColumnKind::Integer,
+            Column::Integer,
+            Column::Text,
+            Column::Integer,
+            Column::Real,
+            Column::Integer,
+            Column::Integer,
         ];
         let rows = db
             .fetch("SELECT * FROM t ORDER BY id", &[], &kinds)
@@ -602,11 +599,11 @@ mod tests {
         assert_eq!(rows[0].datetime(5).unwrap().timestamp(), 1700000001);
         let cols = db.columns("t").await.unwrap();
         assert_eq!(
-            cols.iter().map(|col| col.name.as_str()).collect::<Vec<_>>(),
+            cols.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             vec!["id", "name", "age", "score", "flag", "at"]
         );
         let count = db
-            .fetch("SELECT COUNT(*) FROM t", &[], &[ColumnKind::Integer])
+            .fetch("SELECT COUNT(*) FROM t", &[], &[Column::Integer])
             .await
             .unwrap();
         assert_eq!(count[0].int(0).unwrap(), 1);

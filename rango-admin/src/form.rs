@@ -1,8 +1,5 @@
 use rango_core::model::Field;
-use rango_core::{
-    Error,
-    store::{Cells, Gather, Value, Widget},
-};
+use rango_core::{Error, store::{Cells, Value, Widget}};
 
 use super::row::text;
 
@@ -68,9 +65,9 @@ pub(crate) fn value(field: &Field, raw: Option<&String>) -> Result<Value, Error>
             Err(Error::BadRequest(format!("{} is required", field.name)))
         };
     }
-    let mut gather = Gather::new();
-    (field.parse)(raw, &mut gather)?;
-    Ok(gather.value())
+    let mut value = Value::Null;
+    (field.parse)(raw, &mut value)?;
+    Ok(value)
 }
 
 fn control(field: &Field, value: &str, checked: bool) -> String {

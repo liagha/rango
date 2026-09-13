@@ -6,7 +6,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use crate::{
     error::Error,
-    store::{Cells, Gather, Reader, Row, Slots, Store, StoreError, Value, Widget, Writer},
+    store::{Cells, Reader, Row, Store, StoreError, Value, Widget, Writer},
 };
 
 pub use crate::store::{
@@ -73,16 +73,16 @@ pub trait Model: Clone + Send + Sync + 'static {
 
     /// Cell values of this model in field order.
     fn row(&self) -> Vec<Value> {
-        let mut slots = Slots::new();
-        self.write(&mut slots);
-        slots.values()
+        let mut values = Vec::new();
+        self.write(&mut values);
+        values
     }
 
     /// Key value of this model.
     fn id(&self) -> Value {
-        let mut gather = Gather::new();
-        self.write_id(&mut gather);
-        gather.value()
+        let mut value = Value::Null;
+        self.write_id(&mut value);
+        value
     }
 }
 

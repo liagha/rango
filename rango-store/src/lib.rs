@@ -151,7 +151,7 @@ impl From<&Option<String>> for Value {
 
 /// How a column's cells map to [`Value`]s when read back.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub enum ColumnKind {
+pub enum Column {
     /// Integer affinity ([`Value::Int`]).
     Integer,
     /// Floating-point affinity ([`Value::Float`]).
@@ -160,29 +160,20 @@ pub enum ColumnKind {
     Text,
 }
 
-impl ColumnKind {
+impl Column {
     /// Affinity of a field's SQL type name.
     pub fn of(raw: &str) -> Self {
         let sql = raw.to_uppercase();
         if sql.contains("INT") || sql.contains("BOOL") {
-            ColumnKind::Integer
+            Column::Integer
         } else if sql.contains("CHAR") || sql.contains("TEXT") {
-            ColumnKind::Text
+            Column::Text
         } else if sql.contains("REAL") || sql.contains("FLOA") || sql.contains("DOUB") {
-            ColumnKind::Real
+            Column::Real
         } else {
-            ColumnKind::Text
+            Column::Text
         }
     }
-}
-
-/// A single column: name plus affinity kind.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Column {
-    /// Column name.
-    pub name: String,
-    /// Value affinity of the column.
-    pub kind: ColumnKind,
 }
 
 /// One fetched row, cells aligned with the query's columns.
@@ -651,85 +642,39 @@ impl<T: Storable> Storable for Option<T> {
     }
 }
 
-/// [`Writer`] that captures a single value.
-pub struct Gather {
-    value: Value,
-}
-
-impl Gather {
-    /// An empty gather starts at [`Value::Null`].
-    pub fn new() -> Self {
-        Self { value: Value::Null }
-    }
-
-    /// The captured value.
-    pub fn value(self) -> Value {
-        self.value
-    }
-}
-
-impl Default for Gather {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Writer for Gather {
+impl Writer for Value {
     fn nothing(&mut self) {
-        self.value = Value::Null;
+        *self = Value::Null;
     }
 
     fn int(&mut self, value: i64) {
-        self.value = Value::Int(value);
+        *self = Value::int(value);
     }
 
     fn flt(&mut self, value: f64) {
-        self.value = Value::Float(value);
+        *self = Value::float(value);
     }
 
     fn str(&mut self, value: &str) {
-        self.value = Value::Str(value.into());
+        *self = Value::str(value);
     }
 }
 
-/// [`Writer`] that collects every written value in order.
-pub struct Slots {
-    values: Vec<Value>,
-}
-
-impl Slots {
-    /// An empty slot list.
-    pub fn new() -> Self {
-        Self { values: Vec::new() }
-    }
-
-    /// The collected values.
-    pub fn values(self) -> Vec<Value> {
-        self.values
-    }
-}
-
-impl Default for Slots {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Writer for Slots {
+impl Writer for Vec<Value> {
     fn nothing(&mut self) {
-        self.values.push(Value::Null);
+        self.push(Value::Null);
     }
 
     fn int(&mut self, value: i64) {
-        self.values.push(Value::Int(value));
+        self.push(Value::int(value));
     }
 
     fn flt(&mut self, value: f64) {
-        self.values.push(Value::Float(value));
+        self.push(Value::float(value));
     }
 
     fn str(&mut self, value: &str) {
-        self.values.push(Value::Str(value.into()));
+        self.push(Value::str(value));
     }
 }
 
@@ -839,11 +784,11 @@ pub trait Store: Send + Sync + 'static {
         &'a self,
         sql: &'a str,
         params: &'a [Value],
-        kinds: &'a [ColumnKind],
+        kinds: &'a [Column],
     ) -> BoxFuture<'a, Result<Rows, StoreError>>;
 
-    /// Introspects the columns of `table`.
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
+    /// Introspects the columns of `table` as `(name, affinity)` pairs.
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<(String, Column)>, StoreError>> {
         let _ = table;
         Box::pin(async { Err(StoreError::Unsupported("columns".into())) })
     }
@@ -984,17 +929,11 @@ mod tests {
             serde_json::to_string(&Value::decimal(money)).unwrap(),
             "\"1.50\""
         );
+        assert_eq!(serde_json::to_string(&Column::Integer).unwrap(), "\"Integer\"");
+        assert_eq!(serde_json::to_string(&Column::Text).unwrap(), "\"Text\"");
         assert_eq!(
-            serde_json::to_string(&ColumnKind::Integer).unwrap(),
-            "\"Integer\""
-        );
-        let column = Column {
-            name: "posts".into(),
-            kind: ColumnKind::Text,
-        };
-        assert_eq!(
-            serde_json::to_string(&column).unwrap(),
-            "{\"name\":\"posts\",\"kind\":\"Text\"}"
+            serde_json::to_string(&[("name", Column::Integer)]).unwrap(),
+            "[[\"name\",\"Integer\"]]"
         );
         let row = Row {
             values: vec![Value::Int(1), Value::Null],

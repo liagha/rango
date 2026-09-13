@@ -3,7 +3,7 @@ use std::sync::Arc;
 use sea_orm::{Database, DbBackend, DbErr, QueryResult};
 
 use crate::engine::{Dialect, Engine};
-use crate::{ColumnKind, Name, Schema, Store, StoreError, Value};
+use crate::{Column, Name, Schema, Store, StoreError, Value};
 
 /// PostgreSQL backend dialect.
 #[derive(Clone)]
@@ -32,9 +32,9 @@ impl Dialect for Postgres {
         )
     }
 
-    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr> {
+    fn shape(&self, row: &QueryResult) -> Result<(String, Column), DbErr> {
         let name = row.try_get_by_index::<String>(0)?;
-        let kind = ColumnKind::of(&row.try_get_by_index::<String>(1)?);
+        let kind = Column::of(&row.try_get_by_index::<String>(1)?);
         Ok((name, kind))
     }
 
@@ -52,14 +52,14 @@ impl Dialect for Postgres {
         None
     }
 
-    fn sum(&self, kind: ColumnKind, column: &str) -> String {
+    fn sum(&self, kind: Column, column: &str) -> String {
         match kind {
-            ColumnKind::Integer => format!("CAST(SUM(\"{column}\") AS BIGINT)"),
+            Column::Integer => format!("CAST(SUM(\"{column}\") AS BIGINT)"),
             _ => format!("SUM(\"{column}\")"),
         }
     }
 
-    fn mean(&self, _kind: ColumnKind, column: &str) -> String {
+    fn mean(&self, _kind: Column, column: &str) -> String {
         format!("CAST(AVG(\"{column}\") AS DOUBLE PRECISION)")
     }
 }
@@ -295,10 +295,10 @@ mod tests {
         );
         let cols = db.columns("fw").await.unwrap();
         assert_eq!(
-            cols.iter().map(|col| col.name.as_str()).collect::<Vec<_>>(),
+            cols.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             vec!["id", "name", "age"]
         );
-        assert_eq!(cols[2].kind, ColumnKind::Integer);
+        assert_eq!(cols[2].1, Column::Integer);
         let id = db
             .insert(
                 "fw",

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{BoxFuture, Column, ColumnKind, Gather, Reader, Show, Storable, Store, StoreError, Value, Widget, Writer};
+use crate::{BoxFuture, Column, Reader, Show, Storable, Store, StoreError, Value, Widget, Writer};
 
 /// A table name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -451,9 +451,9 @@ impl Field {
     pub fn initial(&self) -> Value {
         match &self.default {
             Some(make) => {
-                let mut gather = Gather::new();
-                make(&mut gather);
-                gather.value()
+                let mut value = Value::Null;
+                make(&mut value);
+                value
             }
             None => Value::Null,
         }
@@ -499,18 +499,18 @@ impl Schema {
     }
 
     /// Storage kinds of the physical columns, in field order.
-    pub fn kinds(&self) -> Vec<ColumnKind> {
+    pub fn kinds(&self) -> Vec<Column> {
         let mut out = Vec::new();
         for field in &self.fields {
             if !field.many {
-                out.push(ColumnKind::of(field.dtype));
+                out.push(Column::of(field.dtype));
             }
         }
         out
     }
 
     /// Storage kind of a physical column, or a [`StoreError`] for a virtual or missing one.
-    pub fn kind(&self, name: Name) -> Result<ColumnKind, StoreError> {
+    pub fn kind(&self, name: Name) -> Result<Column, StoreError> {
         let field = self
             .fields
             .iter()
@@ -519,7 +519,7 @@ impl Schema {
         if field.many {
             return Err(StoreError::Value(format!("virtual column {name}")));
         }
-        Ok(ColumnKind::of(field.dtype))
+        Ok(Column::of(field.dtype))
     }
 
     /// `ORDER BY` clause for the given sorts, defaulting to the key.
@@ -539,22 +539,22 @@ impl Schema {
     }
 
     /// Same-kind column pairs where a stored column was renamed to a schema field.
-    pub fn moved(&self, have: &[Column]) -> Vec<(String, String)> {
+    pub fn moved(&self, have: &[(String, Column)]) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for kind in [ColumnKind::Integer, ColumnKind::Real, ColumnKind::Text] {
+        for kind in [Column::Integer, Column::Real, Column::Text] {
             let gone = have
                 .iter()
-                .filter(|col| col.kind == kind && col.name != "id")
-                .filter(|col| !self.fields.iter().any(|field| field.name.as_str() == col.name))
+                .filter(|(name, column)| column == &kind && name != "id")
+                .filter(|(name, _)| !self.fields.iter().any(|field| field.name.as_str() == name))
                 .collect::<Vec<_>>();
             let fresh = self
                 .fields
                 .iter()
-                .filter(|field| !field.id && !field.many && ColumnKind::of(field.dtype) == kind)
-                .filter(|field| !have.iter().any(|col| col.name == field.name.as_str()))
+                .filter(|field| !field.id && !field.many && Column::of(field.dtype) == kind)
+                .filter(|field| !have.iter().any(|(name, _)| name == field.name.as_str()))
                 .collect::<Vec<_>>();
             if let ([old], [new]) = (gone.as_slice(), fresh.as_slice()) {
-                out.push((old.name.clone(), new.name.as_str().to_string()));
+                out.push((old.0.clone(), new.name.as_str().to_string()));
             }
         }
         out
@@ -562,19 +562,19 @@ impl Schema {
 
     /// `DROP COLUMN` statements for stored columns that are neither the key, a schema field,
     /// a renamed old name, nor referenced by another table.
-    pub fn drop(&self, have: &[Column], refs: &[String]) -> Vec<String> {
+    pub fn drop(&self, have: &[(String, Column)], refs: &[String]) -> Vec<String> {
         let mut out = Vec::new();
-        for col in have {
-            if col.name == "id" || refs.contains(&col.name) {
+        for (name, _) in have {
+            if name == "id" || refs.contains(name) {
                 continue;
             }
-            let known = self.fields.iter().any(|field| field.name.as_str() == col.name);
+            let known = self.fields.iter().any(|field| field.name.as_str() == name);
             let moved = self.moved(have);
-            let renamed = moved.iter().any(|(old, _)| old == &col.name);
+            let renamed = moved.iter().any(|(old, _)| old == name);
             if !known && !renamed {
                 out.push(format!(
                     "ALTER TABLE \"{}\" DROP COLUMN \"{}\"",
-                    self.table, col.name
+                    self.table, name
                 ));
             }
         }
@@ -582,7 +582,7 @@ impl Schema {
     }
 
     /// `RENAME COLUMN` statements for moved columns that are not referenced by another table.
-    pub fn rename(&self, have: &[Column], refs: &[String]) -> Vec<String> {
+    pub fn rename(&self, have: &[(String, Column)], refs: &[String]) -> Vec<String> {
         let mut out = Vec::new();
         for (old, new) in self.moved(have) {
             if !refs.contains(&old) {

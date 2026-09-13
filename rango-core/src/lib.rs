@@ -14,8 +14,7 @@ pub mod view;
 
 pub use rango_store as store;
 pub use store::{
-    Cells, Column, ColumnKind, Gather, Reader, Row, Show, Slots, Storable, Store, StoreError,
-    Value, Widget, Writer,
+    Cells, Column, Reader, Row, Show, Storable, Store, StoreError, Value, Widget, Writer,
 };
 
 pub use app::App;

@@ -8,8 +8,8 @@ use sea_orm::{
 use tokio::sync::Mutex;
 
 use crate::{
-    BoxFuture, Column, ColumnKind, Field, Filter, Key, Mass, Name, Only, Op, Policy, Query, Row,
-    Rows, Rule, Schema, Store, StoreError, Tree, Value,
+    BoxFuture, Column, Field, Filter, Key, Mass, Name, Only, Op, Policy, Query, Row, Rows, Rule,
+    Schema, Store, StoreError, Tree, Value,
 };
 
 /// SQL dialect: backend grammar, schema rendering, and row decoding.
@@ -85,14 +85,14 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
         )
     }
 
-    fn alter(&self, schema: &Schema, have: &[Column]) -> Vec<String> {
+    fn alter(&self, schema: &Schema, have: &[(String, Column)]) -> Vec<String> {
         let moved = schema.moved(have);
         let mut out = Vec::new();
         for field in &schema.fields {
             if field.id || field.many {
                 continue;
             }
-            let known = have.iter().any(|col| col.name == field.name.as_str());
+            let known = have.iter().any(|(name, _)| name == field.name.as_str());
             let renamed = moved.iter().any(|(_, name)| name == field.name.as_str());
             if !known && !renamed {
                 out.push(format!(
@@ -238,7 +238,7 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
 
     fn introspect(&self, table: &str) -> String;
 
-    fn shape(&self, row: &QueryResult) -> Result<(String, ColumnKind), DbErr>;
+    fn shape(&self, row: &QueryResult) -> Result<(String, Column), DbErr>;
 
     fn fks(&self, table: &str) -> String;
 
@@ -246,9 +246,9 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
 
     fn latest(&self) -> Option<&'static str>;
 
-    fn sum(&self, kind: ColumnKind, column: &str) -> String;
+    fn sum(&self, kind: Column, column: &str) -> String;
 
-    fn mean(&self, kind: ColumnKind, column: &str) -> String;
+    fn mean(&self, kind: Column, column: &str) -> String;
 }
 
 impl Tree {
@@ -300,21 +300,21 @@ impl<C: ConnectionTrait> Runner<C> {
         Statement::from_sql_and_values(dialect.backend(), sql, Self::binds(params))
     }
 
-    fn row(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, StoreError> {
+    fn row(row: &QueryResult, kinds: &[Column]) -> Result<Row, StoreError> {
         let mut values = Vec::with_capacity(kinds.len());
         for (i, kind) in kinds.iter().enumerate() {
             let value = match kind {
-                ColumnKind::Integer => match row.try_get_by_index::<Option<i64>>(i) {
+                Column::Integer => match row.try_get_by_index::<Option<i64>>(i) {
                     Ok(Some(v)) => Value::int(v),
                     Ok(None) => Value::Null,
                     Err(err) => return Err(StoreError::from(err)),
                 },
-                ColumnKind::Real => match row.try_get_by_index::<Option<f64>>(i) {
+                Column::Real => match row.try_get_by_index::<Option<f64>>(i) {
                     Ok(Some(v)) => Value::float(v),
                     Ok(None) => Value::Null,
                     Err(err) => return Err(StoreError::from(err)),
                 },
-                ColumnKind::Text => match row.try_get_by_index::<Option<String>>(i) {
+                Column::Text => match row.try_get_by_index::<Option<String>>(i) {
                     Ok(Some(v)) => Value::str(v),
                     Ok(None) => Value::Null,
                     Err(err) => return Err(StoreError::from(err)),
@@ -343,7 +343,7 @@ impl<C: ConnectionTrait> Runner<C> {
         dialect: &D,
         sql: &str,
         params: &[Value],
-        kinds: &[ColumnKind],
+        kinds: &[Column],
     ) -> Result<Rows, StoreError> {
         let rows = self
             .conn
@@ -661,14 +661,14 @@ impl<C: ConnectionTrait> Runner<C> {
         query: &Query,
     ) -> Result<Value, StoreError> {
         let (hint, kinds) = match &query.mass {
-            Some(Mass::Count) => ("COUNT(*)".to_string(), vec![ColumnKind::Integer]),
+            Some(Mass::Count) => ("COUNT(*)".to_string(), vec![Column::Integer]),
             Some(Mass::Sum(name)) => {
                 let kind = schema.kind(*name)?;
                 (dialect.sum(kind, name.as_str()), vec![kind])
             }
             Some(Mass::Mean(name)) => {
                 let kind = schema.kind(*name)?;
-                (dialect.mean(kind, name.as_str()), vec![ColumnKind::Real])
+                (dialect.mean(kind, name.as_str()), vec![Column::Real])
             }
             Some(Mass::Low(name)) => (format!("MIN(\"{name}\")"), vec![schema.kind(*name)?]),
             Some(Mass::High(name)) => (format!("MAX(\"{name}\")"), vec![schema.kind(*name)?]),
@@ -713,7 +713,7 @@ impl<C: ConnectionTrait> Runner<C> {
         &self,
         dialect: &D,
         table: &str,
-    ) -> Result<Vec<Column>, StoreError> {
+    ) -> Result<Vec<(String, Column)>, StoreError> {
         let sql = dialect.introspect(table);
         let rows = self
             .conn
@@ -721,10 +721,7 @@ impl<C: ConnectionTrait> Runner<C> {
             .await
             .map_err(StoreError::from)?;
         rows.iter()
-            .map(|row| {
-                let (name, kind) = dialect.shape(row).map_err(StoreError::from)?;
-                Ok(Column { name, kind })
-            })
+            .map(|row| dialect.shape(row).map_err(StoreError::from))
             .collect()
     }
 
@@ -808,7 +805,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         &'a self,
         sql: &'a str,
         params: &'a [Value],
-        kinds: &'a [ColumnKind],
+        kinds: &'a [Column],
     ) -> BoxFuture<'a, Result<Rows, StoreError>> {
         let sql = sql.to_string();
         let params = params.to_vec();
@@ -818,7 +815,7 @@ impl<D: Dialect, C: ConnectionTrait + TransactionTrait + Send + Sync + 'static> 
         })
     }
 
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<(String, Column)>, StoreError>> {
         let table = table.to_string();
         Box::pin(async move { self.runner.columns(&self.dialect, &table).await })
     }
@@ -969,7 +966,7 @@ impl<D: Dialect> Store for Trade<D> {
         &'a self,
         sql: &'a str,
         params: &'a [Value],
-        kinds: &'a [ColumnKind],
+        kinds: &'a [Column],
     ) -> BoxFuture<'a, Result<Rows, StoreError>> {
         let sql = sql.to_string();
         let params = params.to_vec();
@@ -983,7 +980,7 @@ impl<D: Dialect> Store for Trade<D> {
         })
     }
 
-    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<Column>, StoreError>> {
+    fn columns<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<Vec<(String, Column)>, StoreError>> {
         let table = table.to_string();
         Box::pin(async move {
             let guard = self.txn.lock().await;

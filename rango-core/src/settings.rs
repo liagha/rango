@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::{ColumnKind, Store, Value};
+use crate::{Column, Store, Value};
 
 /// Persistent secret key for the store, generated on first use.
 pub async fn key(store: &dyn Store) -> String {
@@ -37,7 +37,7 @@ async fn read(store: &dyn Store) -> Option<String> {
         .fetch(
             "SELECT value FROM setting WHERE name = 'secret'",
             &[],
-            &[ColumnKind::Text],
+            &[Column::Text],
         )
         .await
         .ok()?;
