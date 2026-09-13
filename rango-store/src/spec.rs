@@ -206,12 +206,14 @@ pub struct Field {
     pub unique: bool,
     pub index: bool,
     pub pick: Option<Pick>,
-    pub default: Option<Arc<dyn Fn(&mut dyn Writer) + Send + Sync + 'static>>,
+    pub default: Option<DefaultFn>,
     pub link: Option<Link>,
     pub widget: fn() -> Widget,
     pub parse: fn(&str, &mut dyn Writer) -> Result<(), StoreError>,
     pub text: fn(&mut dyn Reader) -> String,
 }
+
+pub type DefaultFn = Arc<dyn Fn(&mut dyn Writer) + Send + Sync + 'static>;
 
 impl Field {
     pub fn cell<T: Storable + Show>(name: &'static str) -> Self {
