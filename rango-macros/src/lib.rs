@@ -89,8 +89,8 @@ pub fn template(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Type-level `#[model(table = "messages", actions = "duplicate")]` sets the table name
 /// (defaults to the lowercased type name plus `s`) and lists row-action functions.
 /// Field attributes: `#[key]`, `#[references("table.column")]`, `#[via("through.mine.theirs")]`,
-/// `#[default(value)]`.
-#[proc_macro_derive(Model, attributes(model, key, references, via, default))]
+/// `#[default(value)]`, `#[unique]`.
+#[proc_macro_derive(Model, attributes(model, key, references, via, default, unique))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
     match expand(&input) {
@@ -129,11 +129,15 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         };
         let via = parse_via(attrs)?;
         let default = parse_default(attrs)?;
+        let unique = attrs.iter().any(|a| a.path().is_ident("unique"));
 
         let field_type = inner_of(ty, "Option").unwrap_or(ty);
         let is_optional = field_type != ty;
         let cell_type = inner_of(field_type, "Vec").unwrap_or(field_type);
         let is_many = cell_type != field_type;
+        if is_many && unique {
+            return Err(syn::Error::new_spanned(field, "lists cannot be unique"));
+        }
         if is_many && is_optional {
             return Err(syn::Error::new_spanned(
                 field,
@@ -180,6 +184,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             let mut def = quote! { rango::Field::cell::<#cell_type>(#name) };
             if is_optional {
                 def = quote! { #def.optional() };
+            }
+            if unique {
+                def = quote! { #def.unique() };
             }
             def = quote! { #def #reference };
             if let Some(default_val) = default {

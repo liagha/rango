@@ -284,7 +284,8 @@ impl<M: Model> Repository<M> {
         Repository::<C>::new(self.store.clone()).filter(name, id).await
     }
 
-    /// Rows of another model linked to each given model through a `via` field.
+    /// Rows of another model linked to each given model through a `via` field,
+    /// either forward on a field of this model or reverse on another model's field.
     pub async fn related(
         &self,
         schemas: &[Schema],
@@ -293,15 +294,52 @@ impl<M: Model> Repository<M> {
     ) -> Result<HashMap<Value, Vec<Row>>, StoreError> {
         let missing = |msg: &str| StoreError::Value(msg.into());
         let here = M::schema();
-        let many = here
+        let ids = models.iter().map(|model| model.id()).collect::<Vec<_>>();
+        if let Some(many) = here.fields.iter().find(|entry| entry.name == field) {
+            if !many.many {
+                return Err(StoreError::Unsupported("single field needs filter".into()));
+            }
+            let (through_table, mine, theirs) = match &many.link {
+                Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
+                _ => return Err(missing("many field needs via")),
+            };
+            let through = schemas
+                .iter()
+                .find(|schema| schema.table == through_table)
+                .ok_or_else(|| missing("unknown through"))?;
+            let their = through
+                .fields
+                .iter()
+                .find(|entry| entry.name == theirs)
+                .ok_or_else(|| missing("unknown through column"))?;
+            let (target_table, target_col) = match &their.link {
+                Some(Link::To(table, name)) => (*table, *name),
+                _ => return Err(missing("through column needs references")),
+            };
+            let target = schemas
+                .iter()
+                .find(|schema| schema.table == target_table)
+                .ok_or_else(|| missing("unknown link"))?;
+            return self
+                .linked(through, mine, theirs, target, target_col, &ids)
+                .await;
+        }
+        let owner = schemas
+            .iter()
+            .find(|schema| {
+                schema.fields.iter().any(|entry| {
+                    entry.name == field
+                        && entry.many
+                        && Self::via_target(schemas, &here, entry)
+                })
+            })
+            .ok_or_else(|| missing("unknown field"))?;
+        let entry = owner
             .fields
             .iter()
             .find(|entry| entry.name == field)
             .ok_or_else(|| missing("unknown field"))?;
-        if !many.many {
-            return Err(StoreError::Unsupported("single field needs filter".into()));
-        }
-        let (through_table, mine, theirs) = match &many.link {
+        let (through_table, mine, theirs) = match &entry.link {
             Some(Link::Via(through, mine, theirs)) => (*through, *mine, *theirs),
             _ => return Err(missing("many field needs via")),
         };
@@ -309,29 +347,45 @@ impl<M: Model> Repository<M> {
             .iter()
             .find(|schema| schema.table == through_table)
             .ok_or_else(|| missing("unknown through"))?;
-        let their = through
-            .fields
-            .iter()
-            .find(|entry| entry.name == theirs)
-            .ok_or_else(|| missing("unknown through column"))?;
-        let (target_table, target_col) = match &their.link {
-            Some(Link::To(table, name)) => (*table, *name),
-            _ => return Err(missing("through column needs references")),
+        self.linked(through, theirs, mine, owner, owner.key(), &ids)
+            .await
+    }
+
+    fn via_target(schemas: &[Schema], here: &Schema, entry: &Field) -> bool {
+        let Some(Link::Via(through_table, _, theirs)) = &entry.link else {
+            return false;
         };
-        let target = schemas
+        schemas
             .iter()
-            .find(|schema| schema.table == target_table)
-            .ok_or_else(|| missing("unknown link"))?;
+            .find(|schema| schema.table == *through_table)
+            .is_some_and(|through| {
+                through.fields.iter().any(|column| {
+                    column.name == *theirs
+                        && matches!(&column.link, Some(Link::To(table, _)) if *table == here.table)
+                })
+            })
+    }
+
+    /// For each id on the left through column, the target rows linked on the right.
+    async fn linked(
+        &self,
+        through: &Schema,
+        left: Name,
+        right: Name,
+        target: &Schema,
+        field: Name,
+        ids: &[Value],
+    ) -> Result<HashMap<Value, Vec<Row>>, StoreError> {
         self.store.define(through).await?;
         self.store.define(target).await?;
-        let ids = models.iter().map(|model| model.id()).collect::<Vec<_>>();
         let mut links: HashMap<Value, Vec<Value>> = HashMap::new();
         if !ids.is_empty() {
             let leaves = ids
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|id| {
                     Tree::Leaf(Filter {
-                        field: mine,
+                        field: left,
                         op: Op::Eq,
                         value: id,
                     })
@@ -345,17 +399,17 @@ impl<M: Model> Repository<M> {
                         tree: Tree::Or(leaves),
                         sort: Vec::new(),
                         page: Page::all(),
-                        only: Only::Some(vec![mine, theirs]),
+                        only: Only::Some(vec![left, right]),
                         mass: None,
                     },
                 )
                 .await?;
             for row in &rows {
-                let (Some(mine), Some(theirs)) = (row.get(0), row.get(1)) else {
+                let (Some(left), Some(right)) = (row.get(0), row.get(1)) else {
                     continue;
                 };
-                if *theirs != Value::Null {
-                    links.entry(mine.clone()).or_default().push(theirs.clone());
+                if *right != Value::Null {
+                    links.entry(left.clone()).or_default().push(right.clone());
                 }
             }
         }
@@ -373,7 +427,7 @@ impl<M: Model> Repository<M> {
                 .into_iter()
                 .map(|id| {
                     Tree::Leaf(Filter {
-                        field: target_col,
+                        field,
                         op: Op::Eq,
                         value: id,
                     })
@@ -382,9 +436,9 @@ impl<M: Model> Repository<M> {
             let index = target
                 .fields
                 .iter()
-                .filter(|field| !field.many)
-                .position(|field| field.name == target_col)
-                .ok_or_else(|| missing("unknown column"))?;
+                .filter(|entry| !entry.many)
+                .position(|entry| entry.name == field)
+                .ok_or_else(|| StoreError::Value("unknown column".into()))?;
             let rows = self
                 .store
                 .scan_query(
@@ -401,14 +455,14 @@ impl<M: Model> Repository<M> {
                     },
                 )
                 .await?;
-            for (mine, ids) in &links {
+            for (left, right) in &links {
                 let keep = rows
                     .iter()
-                    .filter(|row| ids.iter().any(|id| row.get(index) == Some(id)))
+                    .filter(|row| right.iter().any(|id| row.get(index) == Some(id)))
                     .cloned()
                     .collect::<Vec<_>>();
                 if !keep.is_empty() {
-                    found.insert(mine.clone(), keep);
+                    found.insert(left.clone(), keep);
                 }
             }
         }
@@ -694,5 +748,108 @@ mod tests {
         assert_eq!(out.get(&Value::int(1)).unwrap().len(), 2);
         assert!(out.contains_key(&Value::int(1)));
         assert!(!out.contains_key(&Value::int(2)));
+    }
+
+    #[derive(Clone)]
+    struct Tag {
+        id: i64,
+        name: String,
+    }
+
+    impl Model for Tag {
+        fn table() -> Table {
+            Table("tags")
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![Field::id(), Field::str("name")]
+        }
+
+        fn write(&self, w: &mut dyn Writer) {
+            Storable::put(&self.name, w);
+        }
+
+        fn read(r: &mut dyn Reader) -> Result<Self, StoreError> {
+            Ok(Self {
+                id: Storable::take(r)?,
+                name: Storable::take(r)?,
+            })
+        }
+
+        fn write_id(&self, w: &mut dyn Writer) {
+            Storable::put(&self.id, w);
+        }
+
+        fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError> {
+            self.id = Storable::take(r)?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn related_reverse() {
+        let path = std::env::temp_dir()
+            .join(format!("rango-test-{}-reverse.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::store::Sqlite::open(&path).await.unwrap();
+        store.define(&Tag::schema()).await.unwrap();
+        store.define(&Post::schema()).await.unwrap();
+        store.define(&Pin::schema()).await.unwrap();
+        for name in ["one", "two"] {
+            store
+                .create(&Tag::schema(), &[vec![(Name("name"), Value::str(name))]])
+                .await
+                .unwrap();
+        }
+        store
+            .create(&Post::schema(), &[vec![(Name("title"), Value::str("one"))]])
+            .await
+            .unwrap();
+        store
+            .create(
+                &Pin::schema(),
+                &[vec![
+                    (Name("post"), Value::int(1)),
+                    (Name("tag"), Value::int(1)),
+                ]],
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &Pin::schema(),
+                &[vec![
+                    (Name("post"), Value::int(1)),
+                    (Name("tag"), Value::int(2)),
+                ]],
+            )
+            .await
+            .unwrap();
+        let tags = vec![
+            Tag {
+                id: 1,
+                name: "one".into(),
+            },
+            Tag {
+                id: 2,
+                name: "two".into(),
+            },
+            Tag {
+                id: 3,
+                name: "three".into(),
+            },
+        ];
+        let repo = Repository::<Tag>::new(store);
+        let out = repo
+            .related(
+                &[Post::schema(), Pin::schema(), Tag::schema()],
+                &tags,
+                Name("tags"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.get(&Value::int(1)).unwrap().len(), 1);
+        assert_eq!(out.get(&Value::int(2)).unwrap().len(), 1);
+        assert!(!out.contains_key(&Value::int(3)));
     }
 }
