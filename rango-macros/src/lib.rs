@@ -9,7 +9,7 @@ use syn::{
     punctuated::Punctuated, Data, DeriveInput, Expr, ExprLit, Fields, ItemFn, Lit, LitStr, Token,
 };
 
-fn with_serde(mut input: DeriveInput, default: bool) -> TokenStream {
+fn serde(mut input: DeriveInput, default: bool) -> TokenStream {
     let derives = if default {
         quote!(rango::prelude::Deserialize, Default)
     } else {
@@ -28,7 +28,7 @@ fn with_serde(mut input: DeriveInput, default: bool) -> TokenStream {
 #[proc_macro_attribute]
 pub fn form(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(item as DeriveInput);
-    with_serde(input, true)
+    serde(input, true)
 }
 
 /// Derives only `Deserialize` for an input struct, using `rango::serde`.
@@ -37,7 +37,7 @@ pub fn form(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn input(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(item as DeriveInput);
-    with_serde(input, false)
+    serde(input, false)
 }
 
 /// Runs an `async fn main` on a multi-threaded tokio runtime with all features enabled.
@@ -101,7 +101,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
-    let (table, deeds) = parse_model(input)?;
+    let (table, actions) = parse_model(input)?;
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -130,8 +130,10 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let via = parse_via(attrs)?;
         let default = parse_default(attrs)?;
 
-        let (field_type, is_optional) = unpack_option(ty);
-        let (cell_type, is_many) = unpack_vec(field_type);
+        let field_type = inner_of(ty, "Option").unwrap_or(ty);
+        let is_optional = field_type != ty;
+        let cell_type = inner_of(field_type, "Vec").unwrap_or(field_type);
+        let is_many = cell_type != field_type;
         if is_many && is_optional {
             return Err(syn::Error::new_spanned(
                 field,
@@ -144,17 +146,23 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let name = ident.to_string();
         let is_id = is_key && name == "id" && !is_many;
 
+        let reference = match ref_path {
+            Some(path) => {
+                let mut chain = quote! { .references(#path) };
+                if let Some(action) = on_delete {
+                    let call = policy_fn(action, field)?;
+                    chain = quote! { #chain.on_delete(rango::Policy::#call()) };
+                }
+                chain
+            }
+            None => quote! {},
+        };
+
         let field_def = if is_id {
             quote! { rango::Field::id() }
         } else if is_key {
             let mut def = quote! { rango::Field::key::<#cell_type>(#name) };
-            if let Some(ref_path) = ref_path {
-                def = quote! { #def.references(#ref_path) };
-if let Some(action) = on_delete {
-                    let call = policy_fn(action);
-                    def = quote! { #def.on_delete(rango::Policy::#call()) };
-                }
-            }
+            def = quote! { #def #reference };
             def
         } else if is_many {
             let mut def = quote! { rango::Field::many(#name) };
@@ -168,18 +176,12 @@ if let Some(action) = on_delete {
                 };
             }
             def
-} else {
+        } else {
             let mut def = quote! { rango::Field::cell::<#cell_type>(#name) };
             if is_optional {
                 def = quote! { #def.optional() };
             }
-            if let Some(ref_path) = ref_path {
-                def = quote! { #def.references(#ref_path) };
-if let Some(action) = on_delete {
-                    let call = policy_fn(action);
-                    def = quote! { #def.on_delete(rango::Policy::#call()) };
-                }
-            }
+            def = quote! { #def #reference };
             if let Some(default_val) = default {
                 def = quote! { #def.default_value(#default_val) };
             }
@@ -212,12 +214,12 @@ if let Some(action) = on_delete {
         },
         None => quote! { Ok(()) },
     };
-    let actions = if deeds.is_empty() {
+    let actions = if actions.is_empty() {
         quote! {}
     } else {
         quote! {
             fn actions() -> Vec<rango::Action> {
-                vec![#(#deeds()),*, rango::Action::wipe()]
+                vec![#(#actions()),*, rango::Action::wipe()]
             }
         }
     };
@@ -257,7 +259,7 @@ if let Some(action) = on_delete {
 
 fn parse_model(input: &DeriveInput) -> syn::Result<(String, Vec<syn::Path>)> {
     let mut table = None;
-    let mut deeds = Vec::new();
+    let mut actions = Vec::new();
     for attr in &input.attrs {
         if !attr.path().is_ident("model") {
             continue;
@@ -276,7 +278,7 @@ fn parse_model(input: &DeriveInput) -> syn::Result<(String, Vec<syn::Path>)> {
                     if raw.is_empty() {
                         continue;
                     }
-                    deeds.push(
+                    actions.push(
                         syn::parse_str::<syn::Path>(raw)
                             .map_err(|_| meta.error("expected action paths"))?,
                     );
@@ -288,18 +290,23 @@ fn parse_model(input: &DeriveInput) -> syn::Result<(String, Vec<syn::Path>)> {
         })?;
     }
     let name = input.ident.to_string().to_lowercase();
-    Ok((table.unwrap_or(format!("{name}s")), deeds))
+    Ok((table.unwrap_or(format!("{name}s")), actions))
 }
 
-fn policy_fn(name: &str) -> proc_macro2::Ident {
+fn policy_fn(name: &str, field: &syn::Field) -> syn::Result<proc_macro2::Ident> {
     let variant = match name {
         "cascade" => "Cascade",
         "protect" => "Protect",
         "set_null" => "Set",
         "nothing" => "Nothing",
-        _ => panic!("unknown on_delete policy: {name}"),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("unknown on_delete policy: {name}"),
+            ))
+        }
     };
-    proc_macro2::Ident::new(variant, proc_macro2::Span::call_site())
+    Ok(proc_macro2::Ident::new(variant, proc_macro2::Span::call_site()))
 }
 
 fn parse_references(attrs: &[syn::Attribute]) -> syn::Result<Option<(String, Option<String>)>> {
@@ -389,26 +396,19 @@ fn parse_default(attrs: &[syn::Attribute]) -> syn::Result<Option<proc_macro2::To
     Ok(None)
 }
 
-fn unpack_option(ty: &syn::Type) -> (&syn::Type, bool) {
-    if let syn::Type::Path(tp) = ty
-        && let Some(segment) = tp.path.segments.last()
-        && segment.ident == "Option"
-        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return (inner, true);
+fn inner_of<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let segment = tp.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
     }
-    (ty, false)
-}
-
-fn unpack_vec(ty: &syn::Type) -> (&syn::Type, bool) {
-    if let syn::Type::Path(tp) = ty
-        && let Some(segment) = tp.path.segments.last()
-        && segment.ident == "Vec"
-        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return (inner, true);
-    }
-    (ty, false)
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    let syn::GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    Some(inner)
 }
