@@ -5,7 +5,9 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Expr, ExprLit, Fields, ItemFn, LitStr};
+use syn::{
+    punctuated::Punctuated, Data, DeriveInput, Expr, ExprLit, Fields, ItemFn, Lit, LitStr, Token,
+};
 
 fn with_serde(mut input: DeriveInput, default: bool) -> TokenStream {
     let derives = if default {
@@ -121,7 +123,10 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         let is_key = attrs.iter().any(|a| a.path().is_ident("key"));
         let references = parse_references(attrs)?;
-        let references = references.as_deref();
+        let (ref_path, on_delete) = match &references {
+            Some((path, deed)) => (Some(path.as_str()), deed.as_deref()),
+            None => (None, None),
+        };
         let via = parse_via(attrs)?;
         let default = parse_default(attrs)?;
 
@@ -143,8 +148,12 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             quote! { rango::Field::id() }
         } else if is_key {
             let mut def = quote! { rango::Field::key::<#cell_type>(#name) };
-            if let Some(ref_path) = references {
+            if let Some(ref_path) = ref_path {
                 def = quote! { #def.references(#ref_path) };
+if let Some(action) = on_delete {
+                    let call = action_fn(action);
+                    def = quote! { #def.on_delete(rango::Action::#call()) };
+                }
             }
             def
         } else if is_many {
@@ -159,13 +168,17 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 };
             }
             def
-        } else {
+} else {
             let mut def = quote! { rango::Field::cell::<#cell_type>(#name) };
             if is_optional {
                 def = quote! { #def.optional() };
             }
-            if let Some(ref_path) = references {
+            if let Some(ref_path) = ref_path {
                 def = quote! { #def.references(#ref_path) };
+if let Some(action) = on_delete {
+                    let call = action_fn(action);
+                    def = quote! { #def.on_delete(rango::Action::#call()) };
+                }
             }
             if let Some(default_val) = default {
                 def = quote! { #def.default_value(#default_val) };
@@ -278,13 +291,51 @@ fn parse_model(input: &DeriveInput) -> syn::Result<(String, Vec<syn::Path>)> {
     Ok((table.unwrap_or(format!("{name}s")), deeds))
 }
 
-fn parse_references(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+fn action_fn(name: &str) -> proc_macro2::Ident {
+    proc_macro2::Ident::new(name, proc_macro2::Span::call_site())
+}
+
+fn parse_references(attrs: &[syn::Attribute]) -> syn::Result<Option<(String, Option<String>)>> {
     for attr in attrs {
         if !attr.path().is_ident("references") {
             continue;
         }
-        let lit: LitStr = attr.parse_args()?;
-        return Ok(Some(lit.value()));
+        let args = attr.parse_args_with(Punctuated::<Expr, Token![,]>::parse_terminated)?;
+        let mut parts = args.into_iter();
+        let path = match parts.next() {
+            Some(Expr::Lit(ExprLit {
+                lit: Lit::Str(lit),
+                ..
+            })) => lit.value(),
+            _ => return Err(syn::Error::new_spanned(attr, "expected \"table.column\"")),
+        };
+        let mut on_delete = None;
+        for arg in parts {
+            match arg {
+                Expr::Assign(assign) => {
+                    let Expr::Path(left) = &*assign.left else {
+                        return Err(syn::Error::new_spanned(&assign, "expected name"));
+                    };
+                    if left.path.is_ident("on_delete") {
+                        let Expr::Lit(ExprLit {
+                            lit: Lit::Str(lit),
+                            ..
+                        }) = &*assign.right
+                        else {
+                            return Err(syn::Error::new_spanned(&assign, "expected literal"));
+                        };
+                        on_delete = Some(lit.value());
+                    }
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        arg,
+                        "expected `on_delete = \"...\"`",
+                    ))
+                }
+            }
+        }
+        return Ok(Some((path, on_delete)));
     }
     Ok(None)
 }

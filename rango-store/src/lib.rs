@@ -22,7 +22,7 @@ pub use spec::{
     Run, Schema, Sort, Table, Tree,
 };
 
-use std::{fmt, future::Future, pin::Pin, str::FromStr, sync::Arc};
+use std::{fmt, future::Future, hash::{Hash, Hasher}, pin::Pin, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
@@ -60,6 +60,23 @@ impl Serialize for Value {
             Self::Bool(value) => serializer.serialize_bool(*value),
             Self::DateTime(at) => serializer.serialize_str(&at.to_rfc3339()),
             Self::Decimal(value) => serializer.serialize_str(&value.to_string()),
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Int(v) => v.hash(state),
+            Self::Float(v) => v.to_bits().hash(state),
+            Self::Str(v) => v.hash(state),
+            Self::Bool(v) => v.hash(state),
+            Self::DateTime(at) => at.timestamp().hash(state),
+            Self::Decimal(v) => v.to_string().hash(state),
         }
     }
 }
@@ -226,6 +243,8 @@ pub enum StoreError {
     Channel(String),
     /// I/O error.
     Io(String),
+    /// Violation of a referenced-row constraint.
+    Reference(String),
     /// Operation not supported by the backend.
     Unsupported(String),
 }
@@ -237,6 +256,7 @@ impl fmt::Display for StoreError {
             | Self::Value(msg)
             | Self::Channel(msg)
             | Self::Io(msg)
+            | Self::Reference(msg)
             | Self::Unsupported(msg) => write!(f, "{msg}"),
         }
     }

@@ -61,6 +61,14 @@ impl Dialect for Sqlite {
         1
     }
 
+    fn fks(&self, table: &str) -> String {
+        format!("SELECT f.\"to\" FROM sqlite_master s, pragma_foreign_key_list(s.\"name\") f WHERE s.type='table' AND f.\"table\"='{table}'")
+    }
+
+    fn fk_at(&self) -> usize {
+        0
+    }
+
     fn type_at(&self) -> usize {
         2
     }
@@ -121,7 +129,8 @@ mod tests {
     use super::*;
     use crate::engine::{alter, ddl, drop, kinds, rename};
     use crate::{
-        Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table, Tree,
+        Action, Column, Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Sort, Table,
+        Tree,
     };
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
     use rust_decimal::Decimal;
@@ -206,8 +215,8 @@ mod tests {
             col("title", ColumnKind::Text),
             col("junk", ColumnKind::Text),
         ];
-        assert_eq!(drop(&schema, &have).len(), 1);
-        assert!(drop(&schema, &have[..2]).is_empty());
+        assert_eq!(drop(&schema, &have, &[]).len(), 1);
+        assert!(drop(&schema, &have[..2], &[]).is_empty());
     }
 
     #[test]
@@ -217,17 +226,17 @@ mod tests {
             col("id", ColumnKind::Integer),
             col("name", ColumnKind::Text),
         ];
-        assert_eq!(rename(&schema, &have).len(), 1);
+        assert_eq!(rename(&schema, &have, &[]).len(), 1);
         assert!(alter(&Sqlite, &schema, &have).is_empty());
-        assert!(drop(&schema, &have).is_empty());
+        assert!(drop(&schema, &have, &[]).is_empty());
         let mixed = vec![
             col("id", ColumnKind::Integer),
             col("name", ColumnKind::Text),
             col("age", ColumnKind::Integer),
         ];
-        assert_eq!(rename(&schema, &mixed).len(), 1);
+        assert_eq!(rename(&schema, &mixed, &[]).len(), 1);
         assert!(alter(&Sqlite, &schema, &mixed).is_empty());
-        assert_eq!(drop(&schema, &mixed).len(), 1);
+        assert_eq!(drop(&schema, &mixed, &[]).len(), 1);
     }
 
     #[tokio::test]
@@ -933,5 +942,150 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(parent_row.str(1).unwrap(), "redone");
+    }
+
+    #[tokio::test]
+    async fn typed_fk_error() {
+        let db = open_db("typed_fk_error").await;
+        let parent = instruments();
+        let child = quotes();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        let orphan = vec![vec![
+            (Name("code"), Value::str("ghost")),
+            (Name("price"), Value::int(9)),
+        ]];
+        match db.create(&child, &orphan).await {
+            Err(StoreError::Reference(_)) => {}
+            other => panic!("expected Reference, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_null_policy() {
+        let db = open_db("set_null_policy").await;
+        let parent = instruments();
+        let child = Schema {
+            table: Table("quotes"),
+            fields: vec![
+                Field::key::<String>("code"),
+                Field::str("underlying")
+                    .optional()
+                    .references("instruments.code")
+                    .on_delete(Action::set_null()),
+            ],
+            rules: Vec::new(),
+        };
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let quote = vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("underlying"), Value::str("x")),
+        ]];
+        db.create(&child, &quote).await.unwrap();
+        db.remove(&parent, &Key::of(&Value::str("x")).unwrap())
+            .await
+            .unwrap();
+        let rows = db
+            .scan_query(&child, &ask(Tree::And(Vec::new())))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(1), Some(&Value::Null));
+    }
+
+    #[tokio::test]
+    async fn protect_policy() {
+        let db = open_db("protect_policy").await;
+        let parent = instruments();
+        let child = Schema {
+            table: Table("quotes"),
+            fields: vec![
+                Field::key::<String>("code"),
+                Field::str("underlying")
+                    .references("instruments.code")
+                    .on_delete(Action::protect()),
+            ],
+            rules: Vec::new(),
+        };
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let quote = vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("underlying"), Value::str("x")),
+        ]];
+        db.create(&child, &quote).await.unwrap();
+        assert!(db
+            .remove(&parent, &Key::of(&Value::str("x")).unwrap())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn path_filters() {
+        let db = open_db("path_filters").await;
+        let parent = instruments();
+        let child = contracts();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let rows = vec![
+            vec![
+                (Name("code"), Value::str("c1")),
+                (Name("underlying"), Value::str("x")),
+            ],
+            vec![
+                (Name("code"), Value::str("c2")),
+                (Name("underlying"), Value::str("x")),
+            ],
+        ];
+        db.create(&child, &rows).await.unwrap();
+        let found = db
+            .scan_query(
+                &child,
+                &Query {
+                    tree: Tree::Leaf(Filter {
+                        field: Name("underlying__title"),
+                        op: Op::Eq,
+                        value: Value::str("done"),
+                    }),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn evolve_skips_referenced() {
+        let db = open_db("evolve_skips_referenced").await;
+        let parent = instruments();
+        let child = quotes();
+        db.define(&parent).await.unwrap();
+        db.define(&child).await.unwrap();
+        db.create(&parent, &instrument("done")).await.unwrap();
+        let quote = vec![vec![
+            (Name("code"), Value::str("x")),
+            (Name("price"), Value::int(9)),
+        ]];
+        db.create(&child, &quote).await.unwrap();
+        let trimmed = Schema {
+            table: Table("instruments"),
+            fields: vec![Field::id(), Field::str("title")],
+            rules: Vec::new(),
+        };
+        db.evolve(&trimmed, true).await.unwrap();
+        db.create(&child, &quote).await.unwrap();
+        let rows = db
+            .scan_query(&child, &ask(Tree::And(Vec::new())))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
     }
 }

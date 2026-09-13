@@ -284,6 +284,8 @@ pub struct Field {
     pub default: Option<DefaultFn>,
     /// Reference to another table, if any.
     pub link: Option<Link>,
+    /// Delete policy for the referenced row.
+    pub on_delete: Action,
     /// Widget for this field.
     pub widget: fn() -> Widget,
     /// Parses raw text into the field's value.
@@ -310,6 +312,7 @@ impl Field {
             pick: None,
             default: None,
             link: None,
+            on_delete: Action::cascade(),
             widget: widget_of::<T>,
             parse: parse_of::<T>,
             text: text_of::<T>,
@@ -359,6 +362,7 @@ impl Field {
             pick: None,
             default: None,
             link: None,
+            on_delete: Action::cascade(),
             widget: nop_widget,
             parse: nop_parse,
             text: nop_text,
@@ -408,6 +412,12 @@ impl Field {
     /// Sets a [`Link`] to another table.
     pub fn link(mut self, link: Link) -> Self {
         self.link = Some(link);
+        self
+    }
+
+    /// Sets the delete policy for a referenced row.
+    pub fn on_delete(mut self, action: Action) -> Self {
+        self.on_delete = action;
         self
     }
 
@@ -518,6 +528,44 @@ impl Action {
             row: true,
         }
     }
+
+    /// Delete child rows along with the referenced parent.
+    pub fn cascade() -> Self {
+        policy("cascade", "Cascade")
+    }
+
+    /// Refuse to delete a referenced parent.
+    pub fn protect() -> Self {
+        policy("protect", "Protect")
+    }
+
+    /// Null the reference when the parent is deleted.
+    pub fn set_null() -> Self {
+        policy("set_null", "Set null")
+    }
+
+    /// Leave a bare reference that rejects parent deletes.
+    pub fn nothing() -> Self {
+        policy("nothing", "Nothing")
+    }
+}
+
+fn policy(name: &'static str, title: &'static str) -> Action {
+    Action {
+        name: Name(name),
+        title,
+        run: idle,
+        logged: false,
+        row: false,
+    }
+}
+
+fn idle(
+    _store: Arc<dyn Store>,
+    _schema: Schema,
+    _keys: Vec<Key>,
+) -> BoxFuture<'static, Result<String, StoreError>> {
+    Box::pin(async { Ok(String::new()) })
 }
 
 fn wipe(

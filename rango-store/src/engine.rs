@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::{NaiveTime, TimeDelta};
 use sea_orm::{
@@ -32,6 +32,8 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
     ) -> String;
     fn introspect(&self, table: &str) -> String;
     fn name_at(&self) -> usize;
+    fn fks(&self, table: &str) -> String;
+    fn fk_at(&self) -> usize;
     fn type_at(&self) -> usize;
     fn reflect(&self, sql: &str) -> ColumnKind;
     fn latest(&self) -> Option<&'static str>;
@@ -40,7 +42,15 @@ pub(crate) trait Dialect: Clone + Send + Sync + 'static {
 }
 
 pub(crate) fn sql_err(err: DbErr) -> StoreError {
-    StoreError::Sql(err.to_string())
+    let msg = err.to_string();
+    if msg.contains("(code: 787)")
+        || msg.contains("FOREIGN KEY constraint failed")
+        || msg.contains("23503")
+    {
+        StoreError::Reference(msg)
+    } else {
+        StoreError::Sql(msg)
+    }
 }
 
 pub(crate) fn bind(values: &[Value]) -> Vec<SeaValue> {
@@ -83,7 +93,18 @@ pub(crate) fn read(row: &QueryResult, kinds: &[ColumnKind]) -> Result<Row, Store
     Ok(Row { values })
 }
 
-pub(crate) fn leaf<D: Dialect>(dialect: &D, filter: &Filter, params: &mut Vec<Value>) -> String {
+pub(crate) fn leaf<D: Dialect>(
+    dialect: &D,
+    paths: &HashMap<Name, (String, Vec<Value>)>,
+    filter: &Filter,
+    params: &mut Vec<Value>,
+) -> String {
+    if let Some((fragment, extra)) = paths.get(&filter.field) {
+        let base = params.len();
+        params.extend(extra.iter().cloned());
+        let mark = dialect.mark(base);
+        return fragment.replace("{mark}", &mark);
+    }
     match filter.op {
         Op::Eq => {
             params.push(filter.value.clone());
@@ -128,13 +149,18 @@ pub(crate) fn leaf<D: Dialect>(dialect: &D, filter: &Filter, params: &mut Vec<Va
     }
 }
 
-pub(crate) fn tree<D: Dialect>(dialect: &D, node: &Tree, params: &mut Vec<Value>) -> String {
+pub(crate) fn tree<D: Dialect>(
+    dialect: &D,
+    paths: &HashMap<Name, (String, Vec<Value>)>,
+    node: &Tree,
+    params: &mut Vec<Value>,
+) -> String {
     match node {
-        Tree::Leaf(filter) => leaf(dialect, filter, params),
+        Tree::Leaf(filter) => leaf(dialect, paths, filter, params),
         Tree::And(parts) => {
             let mut out = Vec::new();
             for node in parts {
-                let cond = tree(dialect, node, params);
+                let cond = tree(dialect, paths, node, params);
                 if !cond.is_empty() {
                     out.push(cond);
                 }
@@ -150,7 +176,7 @@ pub(crate) fn tree<D: Dialect>(dialect: &D, node: &Tree, params: &mut Vec<Value>
         Tree::Or(parts) => {
             let mut out = Vec::new();
             for node in parts {
-                let cond = tree(dialect, node, params);
+                let cond = tree(dialect, paths, node, params);
                 if !cond.is_empty() {
                     out.push(cond);
                 }
@@ -164,7 +190,7 @@ pub(crate) fn tree<D: Dialect>(dialect: &D, node: &Tree, params: &mut Vec<Value>
             }
         }
         Tree::Cut(inner) => {
-            let cond = tree(dialect, inner, params);
+            let cond = tree(dialect, paths, inner, params);
             if cond.is_empty() {
                 "1 = 1".into()
             } else {
@@ -249,9 +275,13 @@ pub(crate) fn column<D: Dialect>(dialect: &D, field: &Field) -> String {
         base
     };
     if let Some((table, column)) = field.reference() {
-        base.push_str(&format!(
-            " REFERENCES \"{table}\"(\"{column}\") ON DELETE CASCADE"
-        ));
+        let policy = match field.on_delete.name.as_str() {
+            "cascade" => " ON DELETE CASCADE",
+            "protect" => " ON DELETE RESTRICT",
+            "set_null" => " ON DELETE SET NULL",
+            _ => "",
+        };
+        base.push_str(&format!(" REFERENCES \"{table}\"(\"{column}\"){policy}"));
     }
     format!("\"{}\" {}", field.name, base)
 }
@@ -299,11 +329,11 @@ pub(crate) fn alter<D: Dialect>(dialect: &D, schema: &Schema, have: &[Column]) -
     out
 }
 
-pub(crate) fn drop(schema: &Schema, have: &[Column]) -> Vec<String> {
+pub(crate) fn drop(schema: &Schema, have: &[Column], refs: &[String]) -> Vec<String> {
     let moved = moved(schema, have);
     let mut out = Vec::new();
     for col in have {
-        if col.name == "id" {
+        if col.name == "id" || refs.contains(&col.name) {
             continue;
         }
         if !schema
@@ -321,9 +351,10 @@ pub(crate) fn drop(schema: &Schema, have: &[Column]) -> Vec<String> {
     out
 }
 
-pub(crate) fn rename(schema: &Schema, have: &[Column]) -> Vec<String> {
+pub(crate) fn rename(schema: &Schema, have: &[Column], refs: &[String]) -> Vec<String> {
     moved(schema, have)
         .into_iter()
+        .filter(|(old, _)| !refs.contains(old))
         .map(|(old, name)| {
             format!(
                 "ALTER TABLE \"{}\" RENAME COLUMN \"{old}\" TO \"{name}\"",
@@ -391,6 +422,71 @@ async fn run_fetch<D: Dialect>(
     rows.iter().map(|row| read(row, kinds)).collect()
 }
 
+async fn resolve_paths<D: Dialect>(
+    conn: &impl ConnectionTrait,
+    dialect: &D,
+    schema: &Schema,
+    query: &Query,
+) -> Result<HashMap<Name, (String, Vec<Value>)>, StoreError> {
+    let mut paths = HashMap::new();
+    let mut seen = Vec::new();
+    collect(&query.tree, &mut seen);
+    for filter in seen {
+        let Some((fk, sub)) = filter.field.as_str().split_once("__") else {
+            continue;
+        };
+        let column = schema
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == fk)
+            .ok_or_else(|| StoreError::Value(format!("unknown field {fk}")))?;
+        let Some((table, ref_name)) = column.reference() else {
+            return Err(StoreError::Value(format!("{fk} needs a reference")));
+        };
+        let sql = dialect.introspect(table.as_str());
+        let rows = conn
+            .query_all(statement(dialect, &sql, &[]))
+            .await
+            .map_err(sql_err)?;
+        let name_at = dialect.name_at();
+        let has = rows.iter().any(|row| {
+            row.try_get_by_index::<String>(name_at).unwrap_or_default() == sub
+        });
+        if !has {
+            return Err(StoreError::Value(format!("unknown column {sub}")));
+        }
+        let op = match filter.op {
+            Op::Eq => "=",
+            Op::Ne => "!=",
+            Op::More => ">",
+            Op::Less => "<",
+            Op::Like => "LIKE",
+            _ => "=",
+        };
+        let fragment = format!(
+            "\"{fk}\" IN (SELECT \"{ref_name}\" FROM \"{table}\" WHERE \"{sub}\" {op} {{mark}})"
+        );
+        paths.insert(filter.field, (fragment, vec![filter.value.clone()]));
+    }
+    Ok(paths)
+}
+
+fn collect<'a>(node: &'a Tree, out: &mut Vec<&'a Filter>) {
+    match node {
+        Tree::Leaf(filter) => {
+            if filter.field.as_str().contains("__") {
+                out.push(filter);
+            }
+        }
+        Tree::And(parts) | Tree::Or(parts) => {
+            for part in parts {
+                collect(part, out);
+            }
+        }
+        Tree::Cut(inner) => collect(inner, out),
+    }
+}
+
 async fn run_scan<D: Dialect>(
     conn: &impl ConnectionTrait,
     dialect: &D,
@@ -418,7 +514,8 @@ async fn run_scan<D: Dialect>(
     };
     let mut params = Vec::new();
     let mut sql = format!("{head} FROM \"{}\"", schema.table);
-    let cond = tree(dialect, &query.tree, &mut params);
+    let paths = resolve_paths(conn, dialect, schema, query).await?;
+    let cond = tree(dialect, &paths, &query.tree, &mut params);
     if !cond.is_empty() {
         sql.push_str(&format!(" WHERE {cond}"));
     }
@@ -449,7 +546,8 @@ async fn run_total<D: Dialect>(
     }
     let mut params = Vec::new();
     let mut sql = format!("SELECT COUNT(*) FROM \"{}\"", schema.table);
-    let cond = tree(dialect, &query.tree, &mut params);
+    let paths = resolve_paths(conn, dialect, schema, query).await?;
+    let cond = tree(dialect, &paths, &query.tree, &mut params);
     if !cond.is_empty() {
         sql.push_str(&format!(" WHERE {cond}"));
     }
@@ -626,7 +724,8 @@ async fn run_evolve<D: Dialect>(
     run_define(conn, dialect, schema).await?;
     done += 1;
     let have = run_columns(conn, dialect, schema.table.as_str()).await?;
-    for sql in rename(schema, &have) {
+    let refs = referenced(conn, dialect, schema.table.as_str()).await?;
+    for sql in rename(schema, &have, &refs) {
         run_execute(conn, dialect, &sql, &[]).await?;
         done += 1;
     }
@@ -635,7 +734,7 @@ async fn run_evolve<D: Dialect>(
         done += 1;
     }
     if trim {
-        for sql in drop(schema, &have) {
+        for sql in drop(schema, &have, &refs) {
             run_execute(conn, dialect, &sql, &[]).await?;
             done += 1;
         }
@@ -668,7 +767,8 @@ async fn run_mass<D: Dialect>(
     };
     let mut params = Vec::new();
     let mut sql = format!("SELECT {head} FROM \"{}\"", schema.table);
-    let cond = tree(dialect, &query.tree, &mut params);
+    let paths = resolve_paths(conn, dialect, schema, query).await?;
+    let cond = tree(dialect, &paths, &query.tree, &mut params);
     if !cond.is_empty() {
         sql.push_str(&format!(" WHERE {cond}"));
     }
@@ -684,6 +784,28 @@ async fn run_mass<D: Dialect>(
         .first()
         .and_then(|row| row.get(0).cloned())
         .unwrap_or(Value::Null))
+}
+
+async fn referenced<D: Dialect>(
+    conn: &impl ConnectionTrait,
+    dialect: &D,
+    table: &str,
+) -> Result<Vec<String>, StoreError> {
+    let rows = conn
+        .query_all(Statement::from_string(dialect.backend(), dialect.fks(table)))
+        .await
+        .map_err(sql_err)?;
+    let mut out = Vec::new();
+    for row in &rows {
+        let name = row
+            .try_get_by_index::<Option<String>>(dialect.fk_at())
+            .unwrap_or(None)
+            .unwrap_or_default();
+        if !name.is_empty() && !out.iter().any(|have| have == &name) {
+            out.push(name);
+        }
+    }
+    Ok(out)
 }
 
 async fn run_columns<D: Dialect>(

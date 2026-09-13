@@ -63,6 +63,16 @@ impl Dialect for Postgres {
         0
     }
 
+    fn fks(&self, table: &str) -> String {
+        format!(
+            "SELECT a.attname FROM pg_constraint c JOIN pg_attribute a ON a.attnum = ANY(c.confkey) AND a.attrelid = c.confrelid WHERE c.contype = 'f' AND c.confrelid = to_regclass('{table}')"
+        )
+    }
+
+    fn fk_at(&self) -> usize {
+        0
+    }
+
     fn type_at(&self) -> usize {
         1
     }

@@ -1,6 +1,6 @@
 //! Model trait and repository over the store.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 
@@ -42,7 +42,7 @@ pub trait Model: Clone + Send + Sync + 'static {
     fn search() -> Vec<Name> {
         Self::fields()
             .into_iter()
-            .filter(|field| field.load() == Widget::Text)
+            .filter(|field| !field.many && field.load() == Widget::Text)
             .map(|field| field.name)
             .collect()
     }
@@ -103,6 +103,19 @@ pub async fn related<M: Model>(
     model: &M,
     field: Name,
 ) -> Result<Vec<Row>, StoreError> {
+    Ok(related_many(store, schemas, std::slice::from_ref(model), field)
+        .await?
+        .remove(&model.id())
+        .unwrap_or_default())
+}
+
+/// Fetches the rows linked to every given model in one query per table.
+pub async fn related_many<M: Model>(
+    store: &Arc<dyn Store>,
+    schemas: &[Schema],
+    models: &[M],
+    field: Name,
+) -> Result<HashMap<Value, Vec<Row>>, StoreError> {
     let bad = |msg: &str| StoreError::Value(msg.into());
     let here = M::schema();
     let many = here
@@ -133,62 +146,99 @@ pub async fn related<M: Model>(
     let target = schemas
         .iter()
         .find(|spec| spec.table == target_table)
-        .ok_or_else(|| bad("unknown target"))?;
+        .ok_or_else(|| bad("unknown link"))?;
     store.define(through).await?;
     store.define(target).await?;
-    let links = store
-        .scan_query(
-            through,
-            &Query {
-                tree: Tree::Leaf(Filter {
+    let ids = models
+        .iter()
+        .map(|model| model.id())
+        .collect::<Vec<_>>();
+    let mut picks: HashMap<Value, Vec<Value>> = HashMap::new();
+    if !ids.is_empty() {
+        let leaves = ids
+            .into_iter()
+            .map(|id| {
+                Tree::Leaf(Filter {
                     field: mine,
                     op: Op::Eq,
-                    value: model.id(),
-                }),
-                sort: Vec::new(),
-                page: Page::all(),
-                only: Only::Some(vec![theirs]),
-                mass: None,
-            },
-        )
-        .await?;
-    let mut ids = Vec::new();
-    for row in &links {
-        if let Some(id) = row.get(0)
-            && *id != Value::Null
-            && !ids.contains(id)
-        {
-            ids.push(id.clone());
+                    value: id,
+                })
+            })
+            .collect();
+        let links = store
+            .scan_query(
+                through,
+                &Query {
+                    tree: Tree::Or(leaves),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::Some(vec![mine, theirs]),
+                    mass: None,
+                },
+            )
+            .await?;
+        for row in &links {
+            let (Some(mine), Some(theirs)) = (row.get(0), row.get(1)) else {
+                continue;
+            };
+            if *theirs != Value::Null {
+                picks.entry(mine.clone()).or_default().push(theirs.clone());
+            }
         }
     }
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    let mut want = Vec::new();
+    for ids in picks.values() {
+        for id in ids {
+            if !want.contains(id) {
+                want.push(id.clone());
+            }
+        }
     }
-    let leaves = ids
-        .into_iter()
-        .map(|id| {
-            Tree::Leaf(Filter {
-                field: target_col,
-                op: Op::Eq,
-                value: id,
+    let mut found: HashMap<Value, Vec<Row>> = HashMap::new();
+    if !want.is_empty() {
+        let leaves = want
+            .into_iter()
+            .map(|id| {
+                Tree::Leaf(Filter {
+                    field: target_col,
+                    op: Op::Eq,
+                    value: id,
+                })
             })
-        })
-        .collect();
-    store
-        .scan_query(
-            target,
-            &Query {
-                tree: Tree::Or(leaves),
-                sort: vec![Sort {
-                    field: target.key(),
-                    order: Order::Asc,
-                }],
-                page: Page::all(),
-                only: Only::All,
-                mass: None,
-            },
-        )
-        .await
+            .collect();
+        let index = target
+            .fields
+            .iter()
+            .filter(|field| !field.many)
+            .position(|field| field.name == target_col)
+            .ok_or_else(|| bad("unknown column"))?;
+        let rows = store
+            .scan_query(
+                target,
+                &Query {
+                    tree: Tree::Or(leaves),
+                    sort: vec![Sort {
+                        field: target.key(),
+                        order: Order::Asc,
+                    }],
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await?;
+        for (mine, ids) in &picks {
+            let keep = rows
+                .iter()
+                .filter(|row| ids.iter().any(|id| row.get(index) == Some(id)))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !keep.is_empty() {
+                found.insert(mine.clone(), keep);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Full CRUD access to one model over a store; usable as an axum extractor.
@@ -356,6 +406,27 @@ impl<M: Model> Repository<M> {
         self.ensure().await?;
         self.store.remove(&M::schema(), &Key::of(id)?).await
     }
+
+    /// Rows of another model that reference this model by its key.
+    pub async fn children<C: Model>(
+        &self,
+        id: &Value,
+    ) -> Result<Vec<C>, StoreError> {
+        let key = M::schema().key();
+        let fields = C::fields();
+        let name = fields
+            .iter()
+            .find(|field| {
+                matches!(
+                    field.link,
+                    Some(Link::To(table, column))
+                        if table == M::table() && column == key
+                )
+            })
+            .map(|field| field.name)
+            .ok_or_else(|| StoreError::Value("no child relation".into()))?;
+        Repository::<C>::new(self.store.clone()).filter(name, id).await
+    }
 }
 
 impl<M: Model> FromRequestParts<()> for Repository<M> {
@@ -388,7 +459,15 @@ mod tests {
         }
 
         fn fields() -> Vec<Field> {
-            vec![Field::id(), Field::str("title")]
+            vec![
+                Field::id(),
+                Field::str("title"),
+                Field::many("tags").link(Link::Via(
+                    Table("pins"),
+                    Name("post"),
+                    Name("tag"),
+                )),
+            ]
         }
 
         fn write(&self, w: &mut dyn Writer) {
@@ -521,5 +600,111 @@ mod tests {
             })
             .await;
         assert!(matches!(projected, Err(StoreError::Unsupported(_))));
+    }
+
+    #[derive(Clone)]
+    struct Pin {
+        id: i64,
+        post: i64,
+        tag: i64,
+    }
+
+    impl Model for Pin {
+        fn table() -> Table {
+            Table("pins")
+        }
+
+        fn fields() -> Vec<Field> {
+            vec![
+                Field::id(),
+                Field::cell::<i64>("post").references("posts.id"),
+                Field::cell::<i64>("tag").references("tags.id"),
+            ]
+        }
+
+        fn write(&self, w: &mut dyn Writer) {
+            Storable::put(&self.post, w);
+            Storable::put(&self.tag, w);
+        }
+
+        fn read(r: &mut dyn Reader) -> Result<Self, StoreError> {
+            Ok(Self {
+                id: Storable::take(r)?,
+                post: Storable::take(r)?,
+                tag: Storable::take(r)?,
+            })
+        }
+
+        fn write_id(&self, w: &mut dyn Writer) {
+            Storable::put(&self.id, w);
+        }
+
+        fn read_id(&mut self, r: &mut dyn Reader) -> Result<(), StoreError> {
+            self.id = Storable::take(r)?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn related_batches() {
+        let path = std::env::temp_dir()
+            .join(format!("rango-test-{}-related.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::store::sqlite::open(&path).await.unwrap();
+        let tag_schema = Schema {
+            table: Table("tags"),
+            fields: vec![Field::id(), Field::str("name")],
+            rules: Vec::new(),
+        };
+        store.define(&tag_schema).await.unwrap();
+        store.define(&Post::spec()).await.unwrap();
+        store.define(&Pin::spec()).await.unwrap();
+        store
+            .create(&tag_schema, &[vec![(Name("name"), Value::str("one"))]])
+            .await
+            .unwrap();
+        store
+            .create(&tag_schema, &[vec![(Name("name"), Value::str("two"))]])
+            .await
+            .unwrap();
+        store
+            .create(
+                &Post::spec(),
+                &[vec![(Name("title"), Value::str("one"))]],
+            )
+            .await
+            .unwrap();
+        let first = vec![vec![
+            (Name("post"), Value::int(1)),
+            (Name("tag"), Value::int(1)),
+        ]];
+        let second = vec![vec![
+            (Name("post"), Value::int(1)),
+            (Name("tag"), Value::int(2)),
+        ]];
+        store.create(&Pin::spec(), &first).await.unwrap();
+        store.create(&Pin::spec(), &second).await.unwrap();
+        let posts = vec![
+            Post {
+                id: 1,
+                title: "one".into(),
+            },
+            Post {
+                id: 2,
+                title: "two".into(),
+            },
+        ];
+        let out = related_many(
+            &store,
+            &[Post::spec(), Pin::spec(), tag_schema],
+            &posts,
+            Name("tags"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.get(&Value::int(1)).unwrap().len(), 2);
+        assert!(out.contains_key(&Value::int(1)));
+        assert!(!out.contains_key(&Value::int(2)));
     }
 }
