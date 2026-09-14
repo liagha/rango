@@ -3,7 +3,7 @@ use std::sync::Arc;
 use sea_orm::{Database, DbBackend, DbErr, QueryResult};
 
 use crate::engine::{Dialect, Engine};
-use crate::{Column, Name, Schema, Store, StoreError, Value};
+use crate::{Column, Store, StoreError};
 
 /// PostgreSQL backend dialect.
 #[derive(Clone)]
@@ -75,7 +75,7 @@ impl Postgres {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Field, Filter, Key, Mass, Only, Op, Order, Page, Query, Sort, Table, Tree};
+    use crate::{Field, Filter, Key, Mass, Name, Only, Op, Order, Page, Query, Schema, Sort, Table, Tree, Value};
     use rust_decimal::Decimal;
 
     async fn db() -> Option<Arc<dyn Store>> {
@@ -350,4 +350,58 @@ mod tests {
         assert!(db.columns("nope").await.unwrap().is_empty());
         drop_tables(&db).await;
     }
+
+    #[tokio::test]
+    async fn migrates() {
+        let Some(db) = db().await else {
+            return;
+        };
+        drop_tables(&db).await;
+        let pending = vec![
+            crate::Pending {
+                name: "0001_note.sql".into(),
+                sql: "-- boot\nCREATE TABLE note (\n  id BIGSERIAL PRIMARY KEY,\n  body TEXT NOT NULL\n);\nINSERT INTO note(body) VALUES ('hi');".into(),
+                checksum: "aaa".into(),
+            },
+            crate::Pending {
+                name: "0002_extra.sql".into(),
+                sql: "ALTER TABLE note ADD COLUMN tag TEXT;".into(),
+                checksum: "bbb".into(),
+            },
+        ];
+        assert_eq!(db.migrate(&pending).await.unwrap(), 2);
+        let rows = db
+            .scan_query(
+                &crate::ledger(),
+                &Query {
+                    tree: Tree::And(Vec::new()),
+                    sort: Vec::new(),
+                    page: Page::all(),
+                    only: Only::All,
+                    mass: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(db.migrate(&pending).await.unwrap(), 0);
+        let count = db
+            .fetch(
+                "SELECT COUNT(*) FROM note WHERE body = 'hi'",
+                &[],
+                &[Column::Integer],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count[0].int(0).unwrap(), 1);
+        let changed = crate::Pending {
+            name: "0001_note.sql".into(),
+            sql: pending[0].sql.clone(),
+            checksum: "ccc".into(),
+        };
+        let err = db.migrate(&[changed]).await.unwrap_err();
+        assert!(format!("{err}").contains("changed"));
+        drop_tables(&db).await;
+    }
 }
+

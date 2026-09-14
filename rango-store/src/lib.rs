@@ -991,25 +991,15 @@ pub trait Store: Send + Sync + 'static {
     /// Last autoincrement id inserted into `table`.
     fn last_id<'a>(&'a self, table: &'a str) -> BoxFuture<'a, Result<i64, StoreError>>;
 
-    /// Raw single-row insert into `table` returning its id.
+    /// Raw single-row insert into `table` returning its id. Dialect-aware
+    /// because bind marks differ per backend (`?` on SQLite, `$n` on Postgres),
+    /// so every backend impl supplies its own.
     fn insert<'a>(
         &'a self,
         table: &'a str,
         columns: &'a [String],
         values: &'a [Value],
-    ) -> BoxFuture<'a, Result<i64, StoreError>> {
-        Box::pin(async move {
-            let cols = columns
-                .iter()
-                .map(|name| format!("\"{name}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let marks = vec!["?"; columns.len()].join(", ");
-            let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({marks})");
-            self.execute(&sql, values).await?;
-            self.last_id(table).await
-        })
-    }
+    ) -> BoxFuture<'a, Result<i64, StoreError>>;
 
     /// Persistent signing secret, generated and stored on first call.
     fn secret<'a>(&'a self) -> BoxFuture<'a, String> {

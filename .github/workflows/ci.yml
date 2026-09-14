@@ -15,4 +15,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test --workspace --features postgres
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: rango
+          POSTGRES_DB: rango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rango_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RANGO_TEST_POSTGRES: postgres://postgres:rango@localhost:5432/rango_test
